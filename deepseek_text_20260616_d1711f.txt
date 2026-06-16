@@ -1,0 +1,20 @@
+
+## 5. Получение постоянной ссылки и DOI
+
+Для научной публикации недостаточно просто URL‑адреса репозитория – желателен **DOI**, который гарантирует неизменность версии.
+
+1. Зарегистрируйтесь на [Zenodo](https://zenodo.org/).
+2. Свяжите аккаунт Zenodo с GitHub (Settings → GitHub).
+3. В Zenodo включите автоматическую архивацию для вашего репозитория.
+4. Создайте **релиз** (release) на GitHub (вкладка Releases → Create a new release). Задайте версию (например, `v1.0.0`), кратко опишите изменения.
+5. Zenodo автоматически заархивирует эту версию и присвоит DOI.
+
+В статье вы затем укажете: *«Code and processed data are available at https://doi.org/10.5281/zenodo.xxxxxxx»*.
+
+## 6. Ссылка в статье
+
+В разделе **Data and Code Availability** (или аналогичном) напишите:
+
+> Все скрипты и обработанные данные, использованные для построения HPO‑стратификации, размещены в публичном репозитории GitHub [https://github.com/yourusername/ciliopathy-hpo-stratification](https://github.com/yourusername/ciliopathy-hpo-stratification) и заархивированы в Zenodo с присвоением DOI: [10.5281/zenodo.xxxxxxx](https://doi.org/10.5281/zenodo.xxxxxxx). Пайплайн реализован на Python 3.10; для воспроизведения окружения предоставлен файл `requirements.txt`.
+
+Таким образом, рецензент и читатели смогут проверить и повторить все этапы обработки.
