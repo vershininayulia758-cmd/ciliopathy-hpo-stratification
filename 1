@@ -1,213 +1,58 @@
-#!/usr/bin/env python3
-"""
-Полный конвейер построения клинической HPO‑стратификации генов цилиопатий
-====================================================================
-Реализовано:
- - Гибридный отбор HPO‑терминов (экспертный каркас + эмпирический фильтр)
- - 4 метода агрегации частот (max, median, trimmed_mean, mode)
- - 10 клинических осей с автоматической классификацией по he.obo
- - Два варианта взвешивания: линейное (1-f) и TF‑IDF (log N/df)
- - Анализ чувствительности (корреляции плеотропных индексов)
- - Интеграция с CiliaMiner (исключение Motile‑генов, если файл предоставлен)
- - Определение числа ортологов Danio rerio через Ensembl REST API
- - Сохранение всех промежуточных матриц и отчётов
-"""
+# ================================
+# УСТАНОВКА БИБЛИОТЕК (для Colab)
+# ================================
+!pip install -q openpyxl tqdm requests pandas scikit-learn seaborn matplotlib
 
 import os
-import sys
-import warnings
-from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional, Union
-
+import requests
 import pandas as pd
 import numpy as np
-import requests
-from tqdm.auto import tqdm
-
+import re
+from pathlib import Path
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from scipy.stats import spearmanr, fisher_exact
+from tqdm import tqdm
+from collections import defaultdict
+import warnings
 warnings.filterwarnings('ignore')
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# ============================================================
+# 1. КОНФИГУРАЦИЯ И ЗАГРУЗКА ВХОДНОГО ФАЙЛА
+# ============================================================
+file_name = "hpo_analysis_results (1).xlsx"   # замените при необходимости
+if not os.path.exists(file_name):
+    from google.colab import files
+    print("📤 Загрузите файл hpo_analysis_results (1).xlsx")
+    uploaded = files.upload()
+    if uploaded:
+        file_name = list(uploaded.keys())[0]
+        print(f"✅ Загружен: {file_name}")
+    else:
+        raise FileNotFoundError("Файл не загружен.")
+else:
+    print(f"✅ Файл найден: {file_name}")
 
-# Список генов цилиопатий (тот же, что в задании)
-GENES = [
-    'ABCA4','ACVR2B','AHI1','ARL13B','ARL3','ARL6','ARMC9','B9D1','B9D2',
-    'BBS1','BBS10','BBS2','BBS4','BBS5','BBS7','BBS8','BBS9','C2CD3','CC2D2A',
-    'CEP104','CEP120','CEP164','CEP19','CEP290','CEP41','CEP55','CEP83','CFAP53',
-    'CNGA1','CSPP1','CTNNB1','DCDC2','DDX59','DHCR7','DHDDS','DYNC2H1','DYNC2LI1',
-    'DZIP1L','ELOVL4','FAM161A','FN1','FOXJ1','GANAB','GDF6','GLI3','GLIS2','GNAS',
-    'GPX4','GUCA1B','GUCY2D','HGSNAT','IFT122','IFT140','IFT172','IFT43','IFT46',
-    'IFT52','IFT57','IFT74','IFT80','IFT81','IMPDH1','INPP5E','INTU','INVS',
-    'IQCB1','KIAA0586','KIF14','KIF3B','KIF7','LRAT','LZTFL1','MKKS','MKS1',
-    'MMP21','NEK1','NEK8','NOP56','NPHP1','NPHP3','NPHP4','OCRL','OFD1','PCNA',
-    'PDE6A','PDE6B','PDE6D','PDE6G','PI4KB','PKD1','PKD1L1','PKD2','PKHD1',
-    'PMM2','PNPLA6','POC1A','PUM1','RBP3','RDH12','RGR','RHO','RP2','RPE65',
-    'RPGR','RPGRIP1L','SAG','SALL1','SCAPER','SDCCAG8','STAT3','SUFU','TCTN1',
-    'TCTN2','TCTN3','TMEM107','TMEM138','TMEM216','TMEM218','TMEM231','TMEM237',
-    'TMEM67','TRAF3IP1','TRPV4','TTC12','TTC21B','TTC8','TULP3','WDR19','WDR35',
-    'ZIC3','ZNF423'
-]
-
-# Пути и URL
-DATA_DIR = Path("./hpo_data")
-DATA_DIR.mkdir(exist_ok=True)
-
-HPO_GENES_FILE = DATA_DIR / "genes_to_phenotype.txt"
-HPO_OBO_FILE   = DATA_DIR / "hp.obo"
-OUTPUT_DIR     = Path("./output_hpo_analysis")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# URL для загрузки HPO
-HPO_GENES_URL = "http://purl.obolibrary.org/obo/hp/hpoa/genes_to_phenotype.txt"
-HPO_OBO_URL   = "http://purl.obolibrary.org/obo/hp/hp.obo"
-
-# Экспертный каркас HPO‑терминов (сверху‑вниз)
-EXPERT_CORE_HPO_IDS = {
-    "HP:0002419",  # Molar tooth sign
-    "HP:0001321",  # Cerebellar hypoplasia
-    "HP:0001305",  # Dandy-Walker malformation
-    "HP:0002326",  # Agenesis of cerebellar vermis
-    "HP:0003272",  # Neural tube defects
-    "HP:0002089",  # Encephalocele
-    "HP:0001274",  # Agenesis of corpus callosum
-    "HP:0001249",  # Intellectual disability
-    "HP:0001251",  # Ataxia
-    "HP:0001250",  # Seizure
-    "HP:0000252",  # Microcephaly
-    "HP:0000090",  # Nephronophthisis
-    "HP:0000083",  # Renal insufficiency
-    "HP:0000107",  # Renal cysts
-    "HP:0000113",  # Polycystic kidney dysplasia
-    "HP:0000092",  # Tubulointerstitial nephritis
-    "HP:0000556",  # Retinal dystrophy
-    "HP:0000589",  # Coloboma
-    "HP:0000648",  # Optic atrophy
-    "HP:0000518",  # Cataract
-    "HP:0000568",  # Microphthalmia
-    "HP:0000639",  # Nystagmus
-    "HP:0000486",  # Strabismus
-    "HP:0001162",  # Polydactyly
-    "HP:0000773",  # Short ribs
-    "HP:0000774",  # Narrow chest
-    "HP:0002650",  # Scoliosis
-    "HP:0001156",  # Brachydactyly
-    "HP:0001363",  # Craniosynostosis
-    "HP:0004322",  # Short stature
-    "HP:0001696",  # Situs inversus totalis
-    "HP:0000853",  # Heterotaxy
-    "HP:0001651",  # Dextrocardia
-    "HP:0004306",  # Abnormal heart looping
-    "HP:0001627",  # Congenital heart defect
-    "HP:0001638",  # Cardiomyopathy
-    "HP:0001392",  # Hepatic fibrosis
-    "HP:0001397",  # Hepatic steatosis
-    "HP:0000365",  # Hearing impairment
-    "HP:0000175",  # Cleft palate
-    "HP:0000157",  # Abnormality of the tongue
-    "HP:0000494",  # Downslanted palpebral fissures
-    "HP:0001513",  # Obesity
-    "HP:0000135",  # Hypogonadism
-    "HP:0000855",  # Insulin resistance
-    "HP:0002591",  # Polyphagia
-    "HP:0003119",  # Dyslipidemia
-}
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-def download_file(url: str, dest: Path) -> None:
-    """Скачивание файла с индикатором прогресса."""
-    if dest.exists():
-        print(f"📁 {dest.name} уже существует, пропускаем загрузку")
-        return
-    print(f"📥 Скачивание {dest.name}...")
-    resp = requests.get(url, stream=True, timeout=60)
-    resp.raise_for_status()
-    total = int(resp.headers.get('content-length', 0))
-    with open(dest, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc=dest.name) as bar:
+# ============================================================
+# 2. ЗАГРУЗКА hp.obo ДЛЯ РАСШИРЕНИЯ ОНТОЛОГИИ
+# ============================================================
+obo_file = Path("hp.obo")
+if not obo_file.exists():
+    print("📥 Скачивание hp.obo...")
+    url = "http://purl.obolibrary.org/obo/hp.obo"
+    resp = requests.get(url, stream=True)
+    with open(obo_file, 'wb') as f:
         for chunk in resp.iter_content(chunk_size=8192):
             f.write(chunk)
-            bar.update(len(chunk))
-    print(f"✅ {dest.name} загружен")
+    print("✅ hp.obo загружен")
 
-# ==================== 1. HPO АННОТАЦИИ ====================
-
-def load_hpo_annotations(filepath: Path, genes: List[str]) -> pd.DataFrame:
-    """Чтение genes_to_phenotype.txt и фильтрация по генам."""
-    print("📖 Чтение HPO аннотаций...")
-    df = pd.read_csv(filepath, sep='\t', comment='#', dtype=str,
-                     names=['gene_id','gene_symbol','HPO_ID','HPO_label','Frequency'])
-    df = df[df['gene_symbol'].str.upper().isin([g.upper() for g in genes])].copy()
-    df['Frequency'] = df['Frequency'].replace('', np.nan).replace('Not specified', np.nan)
-    df.dropna(subset=['Frequency'], inplace=True)
-    print(f"✅ Загружено {len(df)} записей для {df['gene_symbol'].nunique()} генов")
-    return df
-
-def freq_to_score(freq: str) -> Optional[int]:
-    """Преобразование квалификатора HPO в целое число 0–4."""
-    mapping = {
-        'Obligate': 4,
-        'Very frequent': 3,
-        'Frequent': 2,
-        'Occasional': 1,
-        'Rare': 0,
-        'Very rare': 0,
-        'Excluded': 0
-    }
-    return mapping.get(freq, None)
-
-def select_terms_hybrid(df: pd.DataFrame, expert_ids: Set[str], min_genes: int = 3) -> Set[str]:
-    """Гибридный отбор HPO‑терминов."""
-    term_counts = df.groupby('HPO_ID')['gene_symbol'].nunique()
-    empirical_ids = set(term_counts[term_counts >= min_genes].index)
-    final_ids = expert_ids.union(empirical_ids)
-    print(f"   Экспертных: {len(expert_ids)}, эмпирических (≥{min_genes} генов): {len(empirical_ids)}, итого: {len(final_ids)}")
-    return final_ids
-
-# ==================== 2. МАТРИЦА ГЕН × ТЕРМИН ====================
-
-def build_gene_term_matrix(df: pd.DataFrame, final_term_ids: Set[str],
-                           agg_method: str = 'max') -> pd.DataFrame:
-    """
-    Создание матрицы ген × термин со значениями 0–4.
-    agg_method: 'max', 'median', 'trimmed_mean', 'mode'.
-    """
-    df_filtered = df[df['HPO_ID'].isin(final_term_ids)].copy()
-    df_filtered['score'] = df_filtered['Frequency'].apply(freq_to_score)
-    df_filtered = df_filtered.dropna(subset=['score'])
-    df_filtered['score'] = df_filtered['score'].astype(int)
-
-    if agg_method == 'max':
-        matrix = df_filtered.groupby(['gene_symbol', 'HPO_ID'])['score'].max().unstack()
-    elif agg_method == 'median':
-        matrix = df_filtered.groupby(['gene_symbol', 'HPO_ID'])['score'].median().unstack()
-    elif agg_method == 'trimmed_mean':
-        try:
-            from scipy.stats import trim_mean
-        except ImportError:
-            raise ImportError("Для trimmed_mean необходим scipy. Установите: pip install scipy")
-        def tm(x):
-            return trim_mean(x, 0.1) if len(x) > 2 else np.mean(x)
-        matrix = df_filtered.groupby(['gene_symbol', 'HPO_ID'])['score'].apply(tm).unstack()
-    elif agg_method == 'mode':
-        def mode_min(x):
-            modes = x.mode()
-            return modes.min() if not modes.empty else 0
-        matrix = df_filtered.groupby(['gene_symbol', 'HPO_ID'])['score'].apply(mode_min).unstack()
-    else:
-        raise ValueError(f"Неизвестный agg_method: {agg_method}")
-
-    # Приводим к единому индексу и столбцам
-    all_genes = sorted(set(g.upper() for g in GENES))
-    matrix = matrix.reindex(index=all_genes, columns=sorted(final_term_ids))
-    matrix = matrix.fillna(np.nan)
-    matrix.index.name = 'gene_symbol'
-    matrix.columns.name = 'HPO_ID'
-    return matrix
-
-# ==================== 3. КЛИНИЧЕСКИЕ ОСИ ====================
-
-def parse_ontology_ancestors(obo_path: Path, term_ids: Set[str]) -> Dict[str, Set[str]]:
-    """Извлекает всех предков для заданных терминов по is_a отношениям."""
-    print("🔗 Обработка hp.obo...")
+# ============================================================
+# 3. ПАРСИНГ ИЕРАРХИИ (РОДИТЕЛИ) ИЗ hp.obo
+# ============================================================
+def build_parents(obo_path):
     parents = {}
     current_id = None
     with open(obo_path, 'r') as f:
@@ -220,305 +65,270 @@ def parse_ontology_ancestors(obo_path: Path, term_ids: Set[str]) -> Dict[str, Se
             elif line.startswith('is_a: HP:'):
                 if current_id is None:
                     continue
-                parent_id = line.split('!')[0].split(':')[1].strip()
-                full_parent = 'HP:' + parent_id
-                parents.setdefault(current_id, []).append(full_parent)
+                match = re.search(r'HP:\d+', line)
+                if match:
+                    parent_id = match.group()
+                    parents.setdefault(current_id, []).append(parent_id)
+    return parents
 
-    def get_ancestors(tid):
-        stack = [tid]
-        anc = set()
-        while stack:
-            cur = stack.pop()
-            for p in parents.get(cur, []):
-                if p not in anc:
-                    anc.add(p)
-                    stack.append(p)
-        return anc
+def get_ancestors(term, parents_cache, visited=None):
+    if visited is None:
+        visited = set()
+    if term in visited:
+        return set()
+    visited.add(term)
+    anc = set()
+    for p in parents_cache.get(term, []):
+        anc.add(p)
+        anc.update(get_ancestors(p, parents_cache, visited))
+    return anc
 
-    ancestor_map = {}
-    for tid in tqdm(term_ids, desc="Обход предков"):
-        ancestor_map[tid] = get_ancestors(tid)
-    return ancestor_map
+parents = build_parents(obo_file)
+print(f"✅ Построены связи для {len(parents)} терминов")
 
-def classify_terms_by_axes(term_ids: Set[str],
-                           ancestor_map: Dict[str, Set[str]]) -> Dict[str, str]:
-    """
-    Распределение терминов по 10 осям согласно предкам.
-    Приоритет: Laterality > Cardiac > Neuro_PosteriorFossa > Neuro_Cortical >
-               Renal > Ocular > Hearing > Hepatic > Skeletal > Craniofacial > Endocrine_Metabolic.
-    """
-    axis_rules = {
-        'Laterality': {'HP:0001696', 'HP:0000853', 'HP:0001651', 'HP:0004306', 'HP:0001650'},
-        'Cardiac': {'HP:0001626'},
-        'Neuro_PosteriorFossa': {'HP:0001317', 'HP:0012330'},  # cerebellum, hindbrain
-        'Neuro_Cortical': {'HP:0000707'},   # nervous system
-        'Renal': {'HP:0000077'},           # kidney
-        'Ocular': {'HP:0000478'},          # eye
-        'Hearing': {'HP:0000598', 'HP:0000365'},
-        'Hepatic': {'HP:0001392', 'HP:0004297'},
-        'Skeletal': {'HP:0000924'},        # skeletal system
-        'Craniofacial': {'HP:0000152'},    # head or neck
-        'Endocrine_Metabolic': {'HP:0000818', 'HP:0001939'},
-    }
-    priority = list(axis_rules.keys())
+# ============================================================
+# 4. ЗАГРУЗКА МАТРИЦЫ И ВЕСОВ
+# ============================================================
+mat = pd.read_excel(file_name, sheet_name="gene_term_matrix_max", index_col=0)
+weights = pd.read_excel(file_name, sheet_name="term_weights_tfidf", index_col=0)['0']
+all_terms = mat.columns.tolist()
+print(f"📊 Матрица: {mat.shape[0]} генов × {mat.shape[1]} терминов")
 
-    term_axis = {}
-    for tid in term_ids:
-        anc = ancestor_map.get(tid, set())
-        assigned = 'Other'
-        for axis in priority:
-            if anc.intersection(axis_rules[axis]):
-                assigned = axis
-                break
-        term_axis[tid] = assigned
-    return term_axis
+# ============================================================
+# 5. ПОСТРОЕНИЕ ПРЕДКОВ ДЛЯ ВСЕХ ТЕРМИНОВ
+# ============================================================
+ancestor_map = {}
+for term in tqdm(all_terms, desc="Построение предков"):
+    ancestor_map[term] = get_ancestors(term, parents)
+print(f"✅ Предки построены для {len(ancestor_map)} терминов")
 
-# ==================== 4. ВЗВЕШИВАНИЕ ТЕРМИНОВ ====================
+# ============================================================
+# 6. ОПРЕДЕЛЕНИЕ КЛИНИЧЕСКИХ ОСЕЙ (с учётом предков)
+# ============================================================
+EXPERT_TERM_TO_AXIS = {
+    "HP:0002419": "Neuro_PosteriorFossa", "HP:0001321": "Neuro_PosteriorFossa",
+    "HP:0001305": "Neuro_PosteriorFossa", "HP:0002326": "Neuro_PosteriorFossa",
+    "HP:0003272": "Neuro_Cortical", "HP:0002089": "Neuro_Cortical",
+    "HP:0001274": "Neuro_Cortical", "HP:0001249": "Neuro_Cortical",
+    "HP:0001251": "Neuro_Cortical", "HP:0001250": "Neuro_Cortical",
+    "HP:0000252": "Neuro_Cortical",
+    "HP:0000090": "Renal", "HP:0000083": "Renal", "HP:0000107": "Renal",
+    "HP:0000113": "Renal", "HP:0000092": "Renal",
+    "HP:0000556": "Ocular", "HP:0000589": "Ocular", "HP:0000648": "Ocular",
+    "HP:0000518": "Ocular", "HP:0000568": "Ocular", "HP:0000639": "Ocular",
+    "HP:0000486": "Ocular",
+    "HP:0001162": "Skeletal", "HP:0000773": "Skeletal", "HP:0000774": "Skeletal",
+    "HP:0002650": "Skeletal", "HP:0001156": "Skeletal", "HP:0001363": "Skeletal",
+    "HP:0004322": "Skeletal",
+    "HP:0001696": "Laterality", "HP:0000853": "Laterality", "HP:0001651": "Laterality",
+    "HP:0004306": "Laterality",
+    "HP:0001627": "Cardiac", "HP:0001638": "Cardiac",
+    "HP:0001392": "Hepatic", "HP:0001397": "Hepatic",
+    "HP:0000365": "Hearing",
+    "HP:0000175": "Craniofacial", "HP:0000157": "Craniofacial", "HP:0000494": "Craniofacial",
+    "HP:0001513": "Endocrine_Metabolic", "HP:0000135": "Endocrine_Metabolic",
+    "HP:0000855": "Endocrine_Metabolic", "HP:0002591": "Endocrine_Metabolic",
+    "HP:0003119": "Endocrine_Metabolic"
+}
 
-def compute_weights_linear(gene_term_matrix: pd.DataFrame) -> pd.Series:
-    """Вес = 1 - частота (доля генов с баллом ≥1 среди не‑NaN)."""
-    non_nan = gene_term_matrix.notna().sum()
-    positive = (gene_term_matrix >= 1).sum()
-    freq = positive / non_nan
-    weights = 1.0 - freq
-    weights[non_nan == 0] = 0.0
-    return weights
+AXIS_RULES = {
+    'Laterality': {'HP:0001696', 'HP:0000853', 'HP:0001651', 'HP:0004306', 'HP:0001650', 'HP:0011627', 'HP:0000033'},
+    'Cardiac': {'HP:0001627', 'HP:0001626', 'HP:0001638', 'HP:0001643', 'HP:0001671', 'HP:0001712'},
+    'Neuro_PosteriorFossa': {'HP:0001317', 'HP:0012330', 'HP:0001321', 'HP:0001305', 'HP:0002326', 'HP:0002419', 'HP:0001274'},
+    'Neuro_Cortical': {'HP:0000707', 'HP:0001249', 'HP:0001251', 'HP:0001250', 'HP:0000252', 'HP:0001263', 'HP:0001290'},
+    'Renal': {'HP:0000077', 'HP:0000090', 'HP:0000107', 'HP:0000113', 'HP:0000083', 'HP:0000092', 'HP:0005563'},
+    'Ocular': {'HP:0000478', 'HP:0000556', 'HP:0000589', 'HP:0000648', 'HP:0000518', 'HP:0000568', 'HP:0000639', 'HP:0000486'},
+    'Hearing': {'HP:0000365', 'HP:0000598', 'HP:0000407', 'HP:0008510'},
+    'Hepatic': {'HP:0001392', 'HP:0004297', 'HP:0006557', 'HP:0001971'},
+    'Skeletal': {'HP:0000924', 'HP:0001162', 'HP:0000773', 'HP:0000774', 'HP:0002650', 'HP:0001156', 'HP:0001363', 'HP:0004322'},
+    'Craniofacial': {'HP:0000152', 'HP:0000175', 'HP:0000157', 'HP:0000494', 'HP:0000271', 'HP:0000323'},
+    'Endocrine_Metabolic': {'HP:0000818', 'HP:0001939', 'HP:0001513', 'HP:0000135', 'HP:0000855', 'HP:0002591', 'HP:0003119'}
+}
 
-def compute_weights_tfidf(gene_term_matrix: pd.DataFrame) -> pd.Series:
-    """TF‑IDF вес = log(N / df_t), где df_t — число генов с баллом ≥1."""
-    N = gene_term_matrix.shape[0]
-    df_t = (gene_term_matrix >= 1).sum()
-    # Защита от нуля
-    df_t = df_t.replace(0, 1)
-    weights = np.log(N / df_t)
-    weights[df_t == 1] = 0.0
-    return weights
+def get_axis(term):
+    if term in EXPERT_TERM_TO_AXIS:
+        return EXPERT_TERM_TO_AXIS[term]
+    anc = ancestor_map.get(term, set())
+    for axis, terms in AXIS_RULES.items():
+        if anc.intersection(terms) or term in terms:
+            return axis
+    return 'Other'
 
-# ==================== 5. АГРЕГАЦИЯ ПО ОСЯМ ====================
+term_to_axis = {}
+for term in all_terms:
+    term_to_axis[term] = get_axis(term)
 
-def compute_axis_scores(gene_term_matrix: pd.DataFrame,
-                        term_axis_map: Dict[str, str],
-                        term_weights: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    """
-    Рассчитывает средневзвешенный балл каждой оси и плеотропный индекс.
-    Возвращает (axis_scores, pleiotropy_score).
-    """
-    axes = sorted(set(term_axis_map.values()) - {'Other'})
-    axis_scores = pd.DataFrame(index=gene_term_matrix.index, columns=axes)
+axes = sorted(set(term_to_axis.values()) - {'Other'})
+print(f"🗺️ Терминов по осям: {sum(1 for a in term_to_axis.values() if a != 'Other')} из {len(term_to_axis)}")
+print(f"   Оси: {axes}")
 
-    for axis in axes:
-        terms_in_axis = [t for t, a in term_axis_map.items() if a == axis and t in gene_term_matrix.columns]
-        if not terms_in_axis:
-            continue
-        sub_mat = gene_term_matrix[terms_in_axis].astype(float)
-        w = term_weights[terms_in_axis].values
-        not_nan = sub_mat.notna()
-        coverage = not_nan.sum(axis=1) / len(terms_in_axis)
-        weighted_sum = (sub_mat.fillna(0) * w).sum(axis=1)
-        weight_sum = (not_nan * w).sum(axis=1)
-        with np.errstate(invalid='ignore'):
-            avg = np.where(coverage >= 0.5, weighted_sum / weight_sum, np.nan)
-        axis_scores[axis] = avg
+# ============================================================
+# 7. ПЕРЕСЧЁТ БАЛЛОВ ПО ОСЯМ (ВЗВЕШЕННОЕ СРЕДНЕЕ)
+# ============================================================
+axis_scores = pd.DataFrame(index=mat.index, columns=axes)
+for axis in axes:
+    terms = [t for t, a in term_to_axis.items() if a == axis and t in mat.columns]
+    if not terms:
+        continue
+    sub = mat[terms].astype(float)
+    w = weights[terms].values
+    weighted_sum = (sub.fillna(0) * w).sum(axis=1)
+    weight_sum = (sub.notna() * w).sum(axis=1)
+    axis_scores[axis] = weighted_sum / weight_sum.replace(0, np.nan)
 
-    pleiotropy = axis_scores.sum(axis=1)
-    return axis_scores, pleiotropy
+total_score = axis_scores.sum(axis=1, min_count=1)
+pleiotropy = (axis_scores.notna() & (axis_scores > 0)).sum(axis=1)
 
-# ==================== 6. ИНТЕГРАЦИЯ CILIAMINER ====================
+print(f"📊 Генов с Total_score (не NaN): {total_score.dropna().shape[0]}")
 
-def apply_ciliaminer_filter(genes: List[str],
-                            cilia_file: Optional[str] = None) -> Tuple[List[str], pd.DataFrame]:
-    """
-    Если передан CSV с колонками Gene, Category, исключает Motile.
-    Возвращает отфильтрованный список генов и датафрейм с категориями.
-    """
-    if cilia_file is None or not Path(cilia_file).exists():
-        print("⚠️  Файл CiliaMiner не найден, пропускаем фильтрацию.")
-        return genes, pd.DataFrame()
+# ============================================================
+# 8. ДОБАВЛЕНИЕ ФУНКЦИОНАЛЬНЫХ МОДУЛЕЙ (ИЗ ВТОРОГО КОДА)
+# ============================================================
+FUNCTIONAL_MODULES = {
+    'IFT-A (Retrograde)': ['IFT122','IFT140','WDR19','WDR35','TTC21B'],
+    'IFT-B1 (Anterograde, core)': ['IFT52','IFT81','IFT74'],
+    'IFT-B2 (Anterograde, peripheral)': ['IFT27','IFT57','IFT80','IFT172'],
+    'BBSome': ['BBS1','BBS2','BBS4','BBS5','BBS7','BBS9','ARL6','BBIP1','TTC8'],
+    'MKS Module (Transition Zone)': ['MKS1','TMEM216','TMEM67','CEP290','CC2D2A','B9D1','TCTN2','TMEM107','TMEM231','TMEM237','RPGRIP1L','B9D2','TXNDC15'],
+    'NPHP Module (Transition Zone)': ['NPHP1','NPHP3','NPHP4','AHI1','IQCB1','SDCCAG8','INVS','NEK8'],
+    'Basal Body / Centriole': ['OFD1','CEP55','CEP78','CEP83','CEP104','CEP120','CEP250','KIF14','POC1B','C2CD3'],
+    'Motor Complexes': ['DYNC2H1','DYNC2LI1','KIF3B','KIF7'],
+    'Signaling Pathways (Hedgehog, PKD, etc.)': ['SMO','SUFU','ARL13B','INPP5E','PKD1','PKD2'],
+    'CPLANE Complex': ['INTU'],
+    'Axoneme': ['DNAH5','DNAI1','DNAAF2','DNAAF3','CFAP53','CFAP70','CFAP43','CFAP100','CFAP206','CFAP126','CFAP298','CFAP300','CFAP97','CFAP99','CFAP57','CFAP157'],
+    'Ciliogenesis': ['DEUP1','MCIDAS','TMEM17','PRPF6','PRPF8','PRPF31'],
+    'Phototransduction': ['RHO','GNAT1','GNAT2','GNB3','PDE6A','PDE6B','PDE6G','PDE6C','CNGA1','GRK1','SAG','GUCY2D','GUCA1A']
+}
 
-    cilia_df = pd.read_csv(cilia_file)
-    if not {'Gene', 'Category'}.issubset(cilia_df.columns):
-        print("⚠️  Файл CiliaMiner должен содержать 'Gene' и 'Category'. Пропускаем.")
-        return genes, cilia_df
+def get_functional_module(gene_symbol):
+    for module, genes in FUNCTIONAL_MODULES.items():
+        if gene_symbol.upper() in [g.upper() for g in genes]:
+            return module
+    return 'Other Ciliary Proteins'
 
-    # Приводим к верхнему регистру
-    cilia_df['Gene'] = cilia_df['Gene'].str.upper()
-    gene_cat = dict(zip(cilia_df['Gene'], cilia_df['Category']))
+# Добавляем модули в основные таблицы
+axis_scores['Functional_Module'] = axis_scores.index.map(get_functional_module)
+total_score_df = total_score.to_frame(name='Total_score')
+total_score_df['Functional_Module'] = total_score_df.index.map(get_functional_module)
+pleiotropy_df = pleiotropy.to_frame(name='Pleiotropy')
+pleiotropy_df['Functional_Module'] = pleiotropy_df.index.map(get_functional_module)
 
-    # Исключаем Motile и неизвестные (Unknown) — можно только Motile
-    filtered = []
-    removed = []
-    for g in genes:
-        cat = gene_cat.get(g.upper(), 'Not in CiliaMiner')
-        if cat in ['Motile']:   # только подвижные убираем, остальные оставляем
-            removed.append(g)
-        else:
-            filtered.append(g)
-    if removed:
-        print(f"🚫 Исключено генов (Motile): {len(removed)}: {', '.join(removed)}")
-    return filtered, cilia_df
+# ============================================================
+# 9. КЛАСТЕРИЗАЦИЯ
+# ============================================================
+axis_filled = axis_scores[axes].fillna(0)   # без колонки Functional_Module
+scaler = StandardScaler()
+scaled = scaler.fit_transform(axis_filled)
+k = 9
+kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+clusters = kmeans.fit_predict(scaled)
+axis_scores['Cluster'] = clusters
+total_score_df['Cluster'] = clusters
 
-# ==================== 7. ОРТОЛОГИ DANIO RERIO ====================
+# ============================================================
+# 10. СОХРАНЕНИЕ ОБНОВЛЁННОГО EXCEL (добавляем новые листы)
+# ============================================================
+with pd.ExcelWriter(file_name, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+    axis_scores.to_excel(writer, sheet_name='axis_scores_full_ont')
+    total_score_df.to_excel(writer, sheet_name='total_score_full_ont')
+    pleiotropy_df.to_excel(writer, sheet_name='pleiotropy_full_ont')
+    pd.DataFrame.from_dict(term_to_axis, orient='index', columns=['Axis']).to_excel(writer, sheet_name='term_axis_full_ont')
+    # Дополнительный лист с функциональными модулями
+    module_df = total_score_df[['Functional_Module']].copy()
+    module_df.to_excel(writer, sheet_name='functional_modules')
 
-def get_ortholog_status(gene_symbol: str) -> Dict:
-    """Запрос к Ensembl REST API для определения числа ортологов zebrafish."""
-    url = (f"https://rest.ensembl.org/homology/symbol/human/{gene_symbol}"
-           f"?content-type=application/json;type=orthologues;target_taxon=7955")
-    try:
-        resp = requests.get(url, timeout=15)
-        if not resp.ok:
-            return {'gene': gene_symbol, 'num_orthologs': 0, 'status': 'error'}
-        data = resp.json()
-        ortho_ids = set()
-        for entry in data.get('data', []):
-            for homo in entry.get('homologies', []):
-                if homo['target']['species'] == 'danio_rerio':
-                    ortho_ids.add(homo['target']['id'])
-        num = len(ortho_ids)
-        if num == 1:
-            status = '1:1'
-        elif num > 1:
-            status = '1:many'
-        else:
-            status = 'none'
-        return {'gene': gene_symbol, 'num_orthologs': num, 'status': status}
-    except Exception as e:
-        print(f"   ⚠️ Ошибка для {gene_symbol}: {e}")
-        return {'gene': gene_symbol, 'num_orthologs': 0, 'status': 'error'}
+print("✅ Обновлённые листы сохранены:")
+print("   - axis_scores_full_ont (с колонками осей + Functional_Module + Cluster)")
+print("   - total_score_full_ont (Total_score + Functional_Module + Cluster)")
+print("   - pleiotropy_full_ont (Pleiotropy + Functional_Module)")
+print("   - term_axis_full_ont")
+print("   - functional_modules (список генов и их модулей)")
 
-def annotate_orthologs(genes: List[str], output_file: Path) -> pd.DataFrame:
-    """Аннотирует все гены и сохраняет CSV."""
-    print("🐟 Определение ортологов Danio rerio...")
-    results = []
-    for g in tqdm(genes, desc="Запросы к Ensembl"):
-        results.append(get_ortholog_status(g))
-    df = pd.DataFrame(results)
-    df.to_csv(output_file, index=False, encoding='utf-8-sig')
-    print(f"✅ Статус ортологов сохранён в {output_file}")
-    return df
+# ============================================================
+# 11. ВИЗУАЛИЗАЦИИ
+# ============================================================
+# Гистограмма Total_score
+plt.figure(figsize=(10,6))
+sns.histplot(total_score.dropna(), bins=20, kde=True, color='steelblue')
+plt.xlabel('Total_score')
+plt.ylabel('Количество генов')
+plt.title('Распределение Total_score (полная онтология, без порога)')
+plt.tight_layout()
+plt.savefig('total_score_histogram_full_ont.png', dpi=300)
+plt.show()
 
-# ==================== 8. АНАЛИЗ ЧУВСТВИТЕЛЬНОСТИ ====================
+# Тепловая карта осей (отсортировано по Total_score)
+order = total_score.sort_values(ascending=False).index
+axis_sorted = axis_scores.loc[order, axes]
+plt.figure(figsize=(12,10))
+sns.heatmap(axis_sorted, cmap='viridis', cbar_kws={'label': 'Балл по оси'})
+plt.title('Тепловая карта осей (гены отсортированы по Total_score)')
+plt.tight_layout()
+plt.savefig('axis_heatmap_full_ont.png', dpi=300)
+plt.show()
 
-def sensitivity_aggregation(ann_df: pd.DataFrame, final_terms: Set[str]) -> pd.DataFrame:
-    """Сравнение плеотропных индексов для разных методов агрегации."""
-    methods = ['max', 'median', 'mode']
-    try:
-        from scipy.stats import trim_mean
-        methods.append('trimmed_mean')
-    except ImportError:
-        pass
+# PCA с окраской по кластеру
+pca = PCA(n_components=2)
+pca_result = pca.fit_transform(scaled)
+plt.figure(figsize=(10,8))
+scatter = plt.scatter(pca_result[:,0], pca_result[:,1], c=clusters, cmap='tab10', alpha=0.7)
+plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
+plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
+plt.title('PCA-проекция генов, окрашенных по кластерам')
+plt.colorbar(scatter, label='Кластер')
+plt.tight_layout()
+plt.savefig('pca_clusters_full_ont.png', dpi=300)
+plt.show()
 
-    pleio_dict = {}
-    for meth in methods:
-        mat = build_gene_term_matrix(ann_df, final_terms, agg_method=meth)
-        # Используем линейные веса для единообразия
-        weights = compute_weights_linear(mat)
-        # Загружаем маппинг осей (понадобится онтология) – здесь предполагаем,
-        # что оси уже рассчитаны ранее и term_axis_map доступен.
-        # Чтобы не дублировать сложную логику, передадим term_axis_map из внешнего контекста.
-        # Но внутри этой функции у нас нет маппинга. Поэтому мы либо принимаем его как параметр,
-        # либо создаём временный. Я передам term_axis_map как аргумент.
-        # Перепишем сигнатуру.
-        # Пока placeholder, фактический вызов будет после расчёта осей.
-        pass
-    # Корреляция между плеотропными индексами
-    # Вернём датафрейм с корреляциями.
-    # Полная реализация будет в main().
+# PCA с окраской по функциональному модулю (дополнительно)
+modules = axis_scores['Functional_Module'].values
+unique_modules = list(axis_scores['Functional_Module'].unique())
+module_colors = {mod: plt.cm.tab20(i % 20) for i, mod in enumerate(unique_modules)}
+colors = [module_colors[mod] for mod in modules]
+plt.figure(figsize=(12,10))
+scatter = plt.scatter(pca_result[:,0], pca_result[:,1], c=colors, alpha=0.7)
+handles = [plt.Line2D([0],[0], marker='o', color='w', markerfacecolor=module_colors[mod], markersize=8, label=mod) for mod in unique_modules]
+plt.legend(handles=handles, bbox_to_anchor=(1.05,1), loc='upper left')
+plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
+plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
+plt.title('PCA-проекция генов, окрашенных по функциональному модулю')
+plt.tight_layout()
+plt.savefig('pca_modules_full_ont.png', dpi=300)
+plt.show()
 
-# ==================== ГЛАВНЫЙ КОНВЕЙЕР ====================
+# ============================================================
+# 12. ВАЛИДАЦИЯ С ЛЕТАЛЬНОСТЬЮ (если есть)
+# ============================================================
+lethality_file = "lethality.csv"
+if os.path.exists(lethality_file):
+    leth = pd.read_csv(lethality_file)
+    leth['gene'] = leth['gene'].str.upper().str.strip()
+    merged = pd.merge(total_score_df, leth, left_index=True, right_on='gene', how='inner')
+    if len(merged) > 1:
+        cat_map = {
+            'prenatal': 4, 'neonatal': 3, 'infantile': 2,
+            'childhood': 1, 'juvenile': 1, 'adult': 0, 'young adult': 0,
+            'none': 0, 'variable': np.nan
+        }
+        merged['lethality_score'] = merged['category'].str.lower().map(cat_map)
+        merged_valid = merged.dropna(subset=['lethality_score'])
+        if len(merged_valid) > 1:
+            rho, pval = spearmanr(merged_valid['Total_score'], merged_valid['lethality_score'])
+            print(f"📊 Корреляция Спирмена: ρ = {rho:.3f}, p = {pval:.4e} (n={len(merged_valid)})")
+            median_score = merged_valid['Total_score'].median()
+            merged_valid['high_score'] = merged_valid['Total_score'] > median_score
+            merged_valid['lethal'] = merged_valid['lethality_score'] >= 2
+            table = pd.crosstab(merged_valid['high_score'], merged_valid['lethal'])
+            if table.shape == (2,2):
+                oddsratio, p_fisher = fisher_exact(table.values)
+                print(f"📊 Точный тест Фишера: OR = {oddsratio:.2f}, p = {p_fisher:.4e}")
 
-def main():
-    print("=" * 70)
-    print("🔬 ПОЛНЫЙ HPO‑АНАЛИЗ ГЕНОВ ЦИЛИОПАТИЙ")
-    print("=" * 70)
-
-    # 1. Загрузка HPO файлов
-    download_file(HPO_GENES_URL, HPO_GENES_FILE)
-    download_file(HPO_OBO_URL, HPO_OBO_FILE)
-
-    # 2. Загрузка аннотаций
-    ann_df = load_hpo_annotations(HPO_GENES_FILE, GENES)
-
-    # 3. Гибридный отбор терминов
-    final_terms = select_terms_hybrid(ann_df, EXPERT_CORE_HPO_IDS, min_genes=3)
-
-    # 4. Онтология и классификация по осям (едины для всех вариантов)
-    ancestor_map = parse_ontology_ancestors(HPO_OBO_FILE, final_terms)
-    term_axis_map = classify_terms_by_axes(final_terms, ancestor_map)
-    term_axis_df = pd.DataFrame.from_dict(term_axis_map, orient='index', columns=['Axis'])
-    term_axis_df.index.name = 'HPO_ID'
-    term_axis_df.to_csv(OUTPUT_DIR / 'term_axis_mapping.csv', encoding='utf-8-sig')
-    print(f"🗺️ Термины распределены по {term_axis_df['Axis'].nunique()} осям")
-
-    # 5. Построение матрицы основным методом (max) и двумя весами
-    mat_max = build_gene_term_matrix(ann_df, final_terms, agg_method='max')
-    # Веса
-    linear_weights = compute_weights_linear(mat_max)
-    tfidf_weights = compute_weights_tfidf(mat_max)
-
-    # 6. Агрегация по осям для обоих весов
-    axis_lin, pleio_lin = compute_axis_scores(mat_max, term_axis_map, linear_weights)
-    axis_tfidf, pleio_tfidf = compute_axis_scores(mat_max, term_axis_map, tfidf_weights)
-
-    # Сохранение
-    mat_max.to_csv(OUTPUT_DIR / 'gene_term_matrix_max.csv', encoding='utf-8-sig')
-    linear_weights.to_csv(OUTPUT_DIR / 'term_weights_linear.csv', encoding='utf-8-sig')
-    tfidf_weights.to_csv(OUTPUT_DIR / 'term_weights_tfidf.csv', encoding='utf-8-sig')
-    axis_lin.to_csv(OUTPUT_DIR / 'axis_scores_linear.csv', encoding='utf-8-sig')
-    axis_tfidf.to_csv(OUTPUT_DIR / 'axis_scores_tfidf.csv', encoding='utf-8-sig')
-    pleio_lin.to_csv(OUTPUT_DIR / 'pleiotropy_linear.csv', encoding='utf-8-sig')
-    pleio_tfidf.to_csv(OUTPUT_DIR / 'pleiotropy_tfidf.csv', encoding='utf-8-sig')
-
-    # 7. Анализ чувствительности методов агрегации
-    methods = ['max', 'median', 'mode']
-    try:
-        from scipy.stats import trim_mean
-        methods.append('trimmed_mean')
-    except ImportError:
-        print("ℹ️ scipy не установлен, trimmed_mean пропущен")
-
-    pleio_agg = {}
-    for meth in methods:
-        mat = build_gene_term_matrix(ann_df, final_terms, agg_method=meth)
-        # Используем линейные веса
-        w = compute_weights_linear(mat)
-        _, pleio = compute_axis_scores(mat, term_axis_map, w)
-        pleio_agg[meth] = pleio
-
-    pleio_agg_df = pd.DataFrame(pleio_agg)
-    pleio_agg_df.index.name = 'gene_symbol'
-    pleio_agg_df.to_csv(OUTPUT_DIR / 'sensitivity_aggregation.csv', encoding='utf-8-sig')
-    # Корреляции
-    corr_matrix = pleio_agg_df.corr(method='spearman')
-    corr_matrix.to_csv(OUTPUT_DIR / 'sensitivity_aggregation_corr.csv', encoding='utf-8-sig')
-    print("\n📊 Корреляции плеотропных индексов (Spearman):")
-    print(corr_matrix.round(2))
-
-    # 8. Интеграция CiliaMiner (опционально)
-    cilia_file = "cilia_miner_classification.csv"  # Пользователь должен положить файл рядом
-    if Path(cilia_file).exists():
-        filtered_genes, cilia_df = apply_ciliaminer_filter(GENES, cilia_file)
-        if len(filtered_genes) < len(GENES):
-            # Повторяем анализ для отфильтрованного набора
-            ann_filt = ann_df[ann_df['gene_symbol'].str.upper().isin([g.upper() for g in filtered_genes])]
-            mat_filt = build_gene_term_matrix(ann_filt, final_terms, agg_method='max')
-            w_filt = compute_weights_linear(mat_filt)
-            axis_filt, pleio_filt = compute_axis_scores(mat_filt, term_axis_map, w_filt)
-            mat_filt.to_csv(OUTPUT_DIR / 'gene_term_matrix_filtered.csv', encoding='utf-8-sig')
-            axis_filt.to_csv(OUTPUT_DIR / 'axis_scores_filtered.csv', encoding='utf-8-sig')
-            pleio_filt.to_csv(OUTPUT_DIR / 'pleiotropy_filtered.csv', encoding='utf-8-sig')
-            print(f"✅ Анализ на отфильтрованных генах (n={len(filtered_genes)}) сохранён")
-    else:
-        print("ℹ️ Файл CiliaMiner не предоставлен, фильтрация не выполнена.")
-
-    # 9. Аннотация ортологов (может занять время)
-    try:
-        ortho_df = annotate_orthologs(GENES, OUTPUT_DIR / 'ortholog_status.csv')
-    except Exception as e:
-        print(f"⚠️ Не удалось получить ортологов: {e}")
-
-    print("\n" + "=" * 70)
-    print("🎉 Анализ завершён! Все результаты в папке:", OUTPUT_DIR.resolve())
-    print("=" * 70)
-
-if __name__ == "__main__":
-    main()
+# ============================================================
+# 13. СКАЧИВАНИЕ ОБНОВЛЁННОГО ФАЙЛА
+# ============================================================
+try:
+    from google.colab import files
+    files.download(file_name)
+    print("📥 Файл обновлён и скачан.")
+except:
+    print(f"✅ Готовый файл: {file_name}")
