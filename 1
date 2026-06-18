@@ -1,334 +1,308 @@
-# ================================
-# УСТАНОВКА БИБЛИОТЕК (для Colab)
-# ================================
-!pip install -q openpyxl tqdm requests pandas scikit-learn seaborn matplotlib
+# ============================================================
+# ПАЙПЛАЙН: HPO-СТРАТИФИКАЦИЯ ГЕНОВ ЦИЛИОПАТИЙ (18 ОСЕЙ)
+# ТОЛЬКО ШАГИ 1–5: от загрузки онтологии до агрегации по осям
+# (без phenotype.hpoa и буста летальности)
+# ============================================================
+!pip install -q openpyxl requests pandas scipy
 
-import os
-import requests
+import os, requests, re, gzip, logging
 import pandas as pd
 import numpy as np
-import re
-from pathlib import Path
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from scipy.stats import spearmanr, fisher_exact
-from tqdm import tqdm
 from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
 # ============================================================
-# 1. КОНФИГУРАЦИЯ И ЗАГРУЗКА ВХОДНОГО ФАЙЛА
+# 0. КОНСТАНТЫ И СПИСКИ
 # ============================================================
-file_name = "hpo_analysis_results (1).xlsx"   # замените при необходимости
-if not os.path.exists(file_name):
-    from google.colab import files
-    print("📤 Загрузите файл hpo_analysis_results (1).xlsx")
-    uploaded = files.upload()
-    if uploaded:
-        file_name = list(uploaded.keys())[0]
-        print(f"✅ Загружен: {file_name}")
+GENE_LIST = [
+    'KIF7', 'PCNA', 'PKD1', 'PKD2', 'GANAB', 'DZIP1L', 'IFT140', 'ACOT13', 'PTGER2',
+    'ALG9', 'FCYT', 'ALG5', 'NEK8', 'DNAJB11', 'TTC21B', 'SCLT1', 'BBS1', 'BBS2',
+    'ARL6', 'BBS4', 'BBS5', 'MKKS', 'BBS7', 'TTC8', 'BBS9', 'BBS10', 'TRIM32', 'BBS12',
+    'MKS1', 'CEP290', 'WDPCP', 'SDCCAG8', 'LZTFL1', 'BBIP1', 'IFT27', 'IFT172',
+    'C8orf37', 'IFT74', 'IFT81', 'TTC26', 'FLCN', 'TMEM67', 'CC2D2A', 'RPGRIP1L',
+    'PMM2', 'RAB23', 'MEGF8', 'TAPT1', 'ABCA4', 'PDE6C', 'PITPNM3', 'GUCY2D', 'RIMS1',
+    'PROM1', 'GUCA1A', 'CDHR1', 'RAB28', 'TTLL5', 'POC1B', 'DRAM2', 'RPGR', 'CACNA1F',
+    'CEP78', 'GNB1', 'RTN4IP1', 'ARL3', 'GATA6', 'NIPBL', 'SMC1A', 'SMC3', 'RAD21',
+    'HDAC8', 'ANKRD11', 'IFT122', 'WDR35', 'WDR19', 'IFT52', 'DYNC2H1', 'DYNC2LI1',
+    'SMO', 'PRKACB', 'GLI3', 'SIX3', 'SHH', 'TGIF1', 'ZIC2', 'PTCH1', 'GLI2', 'CNOT1',
+    'STAG2', 'HYLS1', 'HNF1B', 'INPP5E', 'TMEM216', 'AHI1', 'NPHP1', 'ARL13B', 'OFD1',
+    'TCTN1', 'TMEM237', 'CEP41', 'TMEM138', 'ZNF423', 'TMEM231', 'CSPP1', 'PDE6D',
+    'KIAA0586', 'TCTN2', 'CEP104', 'B9D1', 'TMEM107', 'ARMC9', 'CEP120', 'SUFU',
+    'PIBF1', 'B9D2', 'FAM149B1', 'TMEM218', 'TOPORS', 'CBY1', 'LRRCC1', 'ADAMTS9',
+    'LAMA1', 'TXNDC15', 'EFHC1', 'GABRA1', 'CACNB4', 'GABRD', 'CLCN2', 'BRD2', 'ANOS1',
+    'FGFR1', 'WDR11', 'NDNF', 'SOX10', 'CHD7', 'PNPLA6', 'RPE65', 'AIPL1', 'LCA5',
+    'CRB1', 'IMPDH1', 'RD3', 'RDH12', 'LRAT', 'KCNJ13', 'GDF6', 'PRPH2', 'USP45',
+    'IQCB1', 'OCRL', 'CEP55', 'NPHP3', 'KIF14', 'CTNNB1', 'OTX1', 'OTX2', 'CEP19',
+    'DCDC2', 'INVS', 'NPHP4', 'GLIS2', 'CEP83', 'MAPKBP1', 'XPNPEP3', 'DDX59', 'C2CD3',
+    'INTU', 'IFT57', 'ZRSR2', 'GNAS', 'PI4KB', 'STAT3', 'ANKS6', 'DNAI1', 'DNAAF3',
+    'HYDIN', 'NME8', 'DNAI2', 'RSPH4A', 'RSPH9', 'CCDC39', 'CCDC40', 'DNAL1', 'CCDC103',
+    'LRRC6', 'DRC1', 'ZMYND10', 'RSPH1', 'CCDC65', 'SPAG1', 'CCNO', 'RSPH3', 'GAS8',
+    'DNAJB13', 'DNAH1', 'FOXJ1', 'TTC12', 'TP73', 'CLXN', 'NME5', 'NME7', 'IFT46',
+    'SPEF2', 'GOLGA3', 'SPAG6', 'USP11', 'CRHR1', 'DNAH7', 'SPAG16', 'DYNLRB2', 'BRWD1',
+    'RP2', 'RHO', 'PRPF31', 'EYS', 'CERKL', 'NRL', 'FAM161A', 'FSCN2', 'CLCC1',
+    'SNRNP200', 'NR2E3', 'MERTK', 'USH2A', 'PDE6B', 'KLHL7', 'PDE6A', 'RGR', 'IDH3B',
+    'SAG', 'GUCA1B', 'CNGA1', 'BEST1', 'PDE6G', 'ZNF513', 'DHDDS', 'PRPF6', 'CLRN1',
+    'MAK', 'RBP3', 'NEK2', 'SLC7A14', 'PRPF4', 'ZNF408', 'HGSNAT', 'AGBL5', 'POMGNT1',
+    'REEP6', 'ARHGEF18', 'HK1', 'ARL2BP', 'DHX38', 'AHR', 'KIAA1549', 'KIF3B', 'IDH3A',
+    'TRAF3IP1', 'POC1A', 'IFT80', 'NEK1', 'GPC3', 'DHCR7', 'ATXN1', 'ATXN2', 'SPTBN2',
+    'CACNA1A', 'ATXN7', 'ATXN10', 'PPP2R2B', 'KCNC3', 'PRKCG', 'ITPR1', 'TBP', 'KCND3',
+    'TMEM240', 'PDYN', 'FGF14', 'AFG3L2', 'ELOVL4', 'TGM6', 'NOP56', 'DAB1', 'ELOVL5',
+    'CCDC88C', 'CACNA1G', 'GRM1', 'FAT2', 'PLD3', 'PUM1', 'STUB1', 'TDP1', 'COA7', 'FN1',
+    'TRPV4', 'PAM16', 'PRKG2', 'GPX4', 'ACP5', 'COL2A1', 'SALL1', 'DACT1', 'MYO7A',
+    'USH1C', 'CDH23', 'PCDH15', 'USH1G', 'CIB2', 'PDZD7', 'ARSG', 'CEP250', 'ZIC3',
+    'SESN1', 'ACVR2B', 'MMP21', 'PKD1L1', 'MNS1'
+]
+
+AXIS_TO_HPO = {
+    'Lethality_KD_only': ['HP:0003826','HP:0001522','HP:0003811'],
+    'Renal_Defects': ['HP:0000090','HP:0000083'],
+    'Retinal_Defects': ['HP:0000479','HP:0000518','HP:0030727'],
+    'Neurological_Defects': [
+        'HP:0003272','HP:0002089','HP:0001274','HP:0001249',
+        'HP:0001251','HP:0002419','HP:0001321','HP:0001305','HP:0002326'],
+    'Body_Axis': ['HP:0002650','HP:0002808','HP:0003300'],
+    'Ciliary_Structure': ['HP:0012261','HP:0033221','HP:0005921','HP:0012885'],
+    'Ciliary_Function_Transport': ['HP:0012262','HP:0012252'],
+    'LR_Asymmetry_Defects': ['HP:0001696','HP:0000853','HP:0001651','HP:0004306'],
+    'Early_Embryonic_Defects': ['HP:0001360','HP:0009914','HP:0001217','HP:0002414'],
+    'Hydrocephalus': ['HP:0000238','HP:0002119'],
+    'Somite_Defects': ['HP:0003468','HP:0002941','HP:0008436','HP:0003422'],
+    'Cardiovascular_Defects': ['HP:0001627','HP:0001638','HP:0001698','HP:0001671'],
+    'Microcephaly': ['HP:0000252'],
+    'Optic_Defects': ['HP:0000556','HP:0000589','HP:0000639','HP:0000486',
+                      'HP:0000521','HP:0000514','HP:0007950'],
+    'Otolith_Defects': ['HP:0000359','HP:0000407','HP:0000405','HP:0000365'],
+    'Cystic_Kidney': ['HP:0000113','HP:0000107','HP:0000092'],
+    'Lethality_Adult': ['HP:0003828']
+}
+
+HPO_WEIGHT = {
+    'HP:0002419':3, 'HP:0001321':3, 'HP:0001305':3, 'HP:0002326':2,
+    'HP:0003272':3, 'HP:0002089':3, 'HP:0001274':2, 'HP:0001249':2,
+    'HP:0001251':1, 'HP:0001250':0, 'HP:0000252':1,
+    'HP:0000090':3, 'HP:0000083':3, 'HP:0000107':1, 'HP:0000113':2, 'HP:0000092':3,
+    'HP:0000556':0, 'HP:0000589':0, 'HP:0000648':2, 'HP:0000518':2,
+    'HP:0000568':2, 'HP:0000639':0, 'HP:0000486':0,
+    'HP:0001162':0, 'HP:0000773':0, 'HP:0000774':1, 'HP:0002650':1,
+    'HP:0001156':0, 'HP:0001363':2, 'HP:0004322':0,
+    'HP:0001696':2, 'HP:0000853':3, 'HP:0001651':0, 'HP:0004306':1,
+    'HP:0001627':3, 'HP:0001638':2, 'HP:0001698':2,
+    'HP:0001392':3, 'HP:0001397':1,
+    'HP:0000365':1,
+    'HP:0000175':1, 'HP:0000157':1, 'HP:0000494':0,
+    'HP:0001513':2, 'HP:0000135':1, 'HP:0000855':2, 'HP:0002591':2, 'HP:0003119':0,
+    'HP:0003826':3, 'HP:0001522':3, 'HP:0003811':3, 'HP:0003828':3,
+    'HP:0030727':2,
+    'HP:0012261':2, 'HP:0033221':2, 'HP:0005921':2, 'HP:0012885':3,
+    'HP:0012262':2, 'HP:0012252':3,
+    'HP:0001360':3, 'HP:0009914':3, 'HP:0001217':3, 'HP:0002414':2,
+    'HP:0000238':3, 'HP:0002119':1,
+    'HP:0003468':2, 'HP:0002941':2, 'HP:0008436':2, 'HP:0003422':1,
+    'HP:0001671':2,
+    'HP:0000521':2, 'HP:0000514':1, 'HP:0007950':1,
+    'HP:0000359':1, 'HP:0000407':1, 'HP:0000405':3,
+    'HP:0003300':1, 'HP:0002808':1,
+    'HP:0000479':2
+}
+
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
+def download_file(url, local_path):
+    if not os.path.exists(local_path):
+        logging.info(f"Скачивание {local_path} ...")
+        resp = requests.get(url, stream=True)
+        with open(local_path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
     else:
-        raise FileNotFoundError("Файл не загружен.")
-else:
-    print(f"✅ Файл найден: {file_name}")
+        logging.info(f"Файл {local_path} уже существует.")
 
 # ============================================================
-# 2. ЗАГРУЗКА hp.obo ДЛЯ РАСШИРЕНИЯ ОНТОЛОГИИ
+# 1. ЗАГРУЗКА hp.obo И ПОСТРОЕНИЕ ИЕРАРХИИ
 # ============================================================
-obo_file = Path("hp.obo")
-if not obo_file.exists():
-    print("📥 Скачивание hp.obo...")
-    url = "http://purl.obolibrary.org/obo/hp.obo"
-    resp = requests.get(url, stream=True)
-    with open(obo_file, 'wb') as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
-    print("✅ hp.obo загружен")
+obo_path = "hp.obo"
+download_file("http://purl.obolibrary.org/obo/hp.obo", obo_path)
 
-# ============================================================
-# 3. ПАРСИНГ ИЕРАРХИИ (РОДИТЕЛИ) ИЗ hp.obo
-# ============================================================
-def build_parents(obo_path):
-    parents = {}
+def build_parents(obo_file):
+    parents = defaultdict(list)
     current_id = None
-    with open(obo_path, 'r') as f:
+    with open(obo_file, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
-            if line.startswith('[Term]'):
+            if line == '[Term]':
                 current_id = None
             elif line.startswith('id: HP:'):
                 current_id = line[4:].strip()
-            elif line.startswith('is_a: HP:'):
-                if current_id is None:
-                    continue
+            elif line.startswith('is_a: HP:') and current_id:
                 match = re.search(r'HP:\d+', line)
                 if match:
-                    parent_id = match.group()
-                    parents.setdefault(current_id, []).append(parent_id)
+                    parents[current_id].append(match.group())
     return parents
 
-def get_ancestors(term, parents_cache, visited=None):
-    if visited is None:
-        visited = set()
-    if term in visited:
-        return set()
-    visited.add(term)
-    anc = set()
-    for p in parents_cache.get(term, []):
-        anc.add(p)
-        anc.update(get_ancestors(p, parents_cache, visited))
-    return anc
+parents = build_parents(obo_path)
+logging.info(f"Загружено {len(parents)} терминов с родительскими связями.")
 
-parents = build_parents(obo_file)
-print(f"✅ Построены связи для {len(parents)} терминов")
+def get_ancestors_cached(term, parents_dict, cache):
+    if term in cache:
+        return cache[term]
+    ancestors = set()
+    for p in parents_dict.get(term, []):
+        ancestors.add(p)
+        ancestors.update(get_ancestors_cached(p, parents_dict, cache))
+    cache[term] = ancestors
+    return ancestors
 
-# ============================================================
-# 4. ЗАГРУЗКА МАТРИЦЫ И ВЕСОВ
-# ============================================================
-mat = pd.read_excel(file_name, sheet_name="gene_term_matrix_max", index_col=0)
-weights = pd.read_excel(file_name, sheet_name="term_weights_tfidf", index_col=0)['0']
-all_terms = mat.columns.tolist()
-print(f"📊 Матрица: {mat.shape[0]} генов × {mat.shape[1]} терминов")
+ancestor_cache = {}
 
 # ============================================================
-# 5. ПОСТРОЕНИЕ ПРЕДКОВ ДЛЯ ВСЕХ ТЕРМИНОВ
+# 2. ЗАГРУЗКА genes_to_phenotype.txt И ОЦЕНКА ЧАСТОТ
 # ============================================================
-ancestor_map = {}
-for term in tqdm(all_terms, desc="Построение предков"):
-    ancestor_map[term] = get_ancestors(term, parents)
-print(f"✅ Предки построены для {len(ancestor_map)} терминов")
+genes_pheno_url = "https://purl.obolibrary.org/obo/hp/hpoa/genes_to_phenotype.txt"
+genes_pheno_path = "genes_to_phenotype.txt"
+download_file(genes_pheno_url, genes_pheno_path)
 
-# ============================================================
-# 6. ОПРЕДЕЛЕНИЕ КЛИНИЧЕСКИХ ОСЕЙ (с учётом предков)
-# ============================================================
-EXPERT_TERM_TO_AXIS = {
-    "HP:0002419": "Neuro_PosteriorFossa", "HP:0001321": "Neuro_PosteriorFossa",
-    "HP:0001305": "Neuro_PosteriorFossa", "HP:0002326": "Neuro_PosteriorFossa",
-    "HP:0003272": "Neuro_Cortical", "HP:0002089": "Neuro_Cortical",
-    "HP:0001274": "Neuro_Cortical", "HP:0001249": "Neuro_Cortical",
-    "HP:0001251": "Neuro_Cortical", "HP:0001250": "Neuro_Cortical",
-    "HP:0000252": "Neuro_Cortical",
-    "HP:0000090": "Renal", "HP:0000083": "Renal", "HP:0000107": "Renal",
-    "HP:0000113": "Renal", "HP:0000092": "Renal",
-    "HP:0000556": "Ocular", "HP:0000589": "Ocular", "HP:0000648": "Ocular",
-    "HP:0000518": "Ocular", "HP:0000568": "Ocular", "HP:0000639": "Ocular",
-    "HP:0000486": "Ocular",
-    "HP:0001162": "Skeletal", "HP:0000773": "Skeletal", "HP:0000774": "Skeletal",
-    "HP:0002650": "Skeletal", "HP:0001156": "Skeletal", "HP:0001363": "Skeletal",
-    "HP:0004322": "Skeletal",
-    "HP:0001696": "Laterality", "HP:0000853": "Laterality", "HP:0001651": "Laterality",
-    "HP:0004306": "Laterality",
-    "HP:0001627": "Cardiac", "HP:0001638": "Cardiac",
-    "HP:0001392": "Hepatic", "HP:0001397": "Hepatic",
-    "HP:0000365": "Hearing",
-    "HP:0000175": "Craniofacial", "HP:0000157": "Craniofacial", "HP:0000494": "Craniofacial",
-    "HP:0001513": "Endocrine_Metabolic", "HP:0000135": "Endocrine_Metabolic",
-    "HP:0000855": "Endocrine_Metabolic", "HP:0002591": "Endocrine_Metabolic",
-    "HP:0003119": "Endocrine_Metabolic"
-}
-
-AXIS_RULES = {
-    'Laterality': {'HP:0001696', 'HP:0000853', 'HP:0001651', 'HP:0004306', 'HP:0001650', 'HP:0011627', 'HP:0000033'},
-    'Cardiac': {'HP:0001627', 'HP:0001626', 'HP:0001638', 'HP:0001643', 'HP:0001671', 'HP:0001712'},
-    'Neuro_PosteriorFossa': {'HP:0001317', 'HP:0012330', 'HP:0001321', 'HP:0001305', 'HP:0002326', 'HP:0002419', 'HP:0001274'},
-    'Neuro_Cortical': {'HP:0000707', 'HP:0001249', 'HP:0001251', 'HP:0001250', 'HP:0000252', 'HP:0001263', 'HP:0001290'},
-    'Renal': {'HP:0000077', 'HP:0000090', 'HP:0000107', 'HP:0000113', 'HP:0000083', 'HP:0000092', 'HP:0005563'},
-    'Ocular': {'HP:0000478', 'HP:0000556', 'HP:0000589', 'HP:0000648', 'HP:0000518', 'HP:0000568', 'HP:0000639', 'HP:0000486'},
-    'Hearing': {'HP:0000365', 'HP:0000598', 'HP:0000407', 'HP:0008510'},
-    'Hepatic': {'HP:0001392', 'HP:0004297', 'HP:0006557', 'HP:0001971'},
-    'Skeletal': {'HP:0000924', 'HP:0001162', 'HP:0000773', 'HP:0000774', 'HP:0002650', 'HP:0001156', 'HP:0001363', 'HP:0004322'},
-    'Craniofacial': {'HP:0000152', 'HP:0000175', 'HP:0000157', 'HP:0000494', 'HP:0000271', 'HP:0000323'},
-    'Endocrine_Metabolic': {'HP:0000818', 'HP:0001939', 'HP:0001513', 'HP:0000135', 'HP:0000855', 'HP:0002591', 'HP:0003119'}
-}
-
-def get_axis(term):
-    if term in EXPERT_TERM_TO_AXIS:
-        return EXPERT_TERM_TO_AXIS[term]
-    anc = ancestor_map.get(term, set())
-    for axis, terms in AXIS_RULES.items():
-        if anc.intersection(terms) or term in terms:
-            return axis
-    return 'Other'
-
-term_to_axis = {}
-for term in all_terms:
-    term_to_axis[term] = get_axis(term)
-
-axes = sorted(set(term_to_axis.values()) - {'Other'})
-print(f"🗺️ Терминов по осям: {sum(1 for a in term_to_axis.values() if a != 'Other')} из {len(term_to_axis)}")
-print(f"   Оси: {axes}")
-
-# ============================================================
-# 7. ПЕРЕСЧЁТ БАЛЛОВ ПО ОСЯМ (ВЗВЕШЕННОЕ СРЕДНЕЕ)
-# ============================================================
-axis_scores = pd.DataFrame(index=mat.index, columns=axes)
-for axis in axes:
-    terms = [t for t, a in term_to_axis.items() if a == axis and t in mat.columns]
-    if not terms:
-        continue
-    sub = mat[terms].astype(float)
-    w = weights[terms].values
-    weighted_sum = (sub.fillna(0) * w).sum(axis=1)
-    weight_sum = (sub.notna() * w).sum(axis=1)
-    axis_scores[axis] = weighted_sum / weight_sum.replace(0, np.nan)
-
-total_score = axis_scores.sum(axis=1, min_count=1)
-pleiotropy = (axis_scores.notna() & (axis_scores > 0)).sum(axis=1)
-
-print(f"📊 Генов с Total_score (не NaN): {total_score.dropna().shape[0]}")
-
-# ============================================================
-# 8. ДОБАВЛЕНИЕ ФУНКЦИОНАЛЬНЫХ МОДУЛЕЙ (ИЗ ВТОРОГО КОДА)
-# ============================================================
-FUNCTIONAL_MODULES = {
-    'IFT-A (Retrograde)': ['IFT122','IFT140','WDR19','WDR35','TTC21B'],
-    'IFT-B1 (Anterograde, core)': ['IFT52','IFT81','IFT74'],
-    'IFT-B2 (Anterograde, peripheral)': ['IFT27','IFT57','IFT80','IFT172'],
-    'BBSome': ['BBS1','BBS2','BBS4','BBS5','BBS7','BBS9','ARL6','BBIP1','TTC8'],
-    'MKS Module (Transition Zone)': ['MKS1','TMEM216','TMEM67','CEP290','CC2D2A','B9D1','TCTN2','TMEM107','TMEM231','TMEM237','RPGRIP1L','B9D2','TXNDC15'],
-    'NPHP Module (Transition Zone)': ['NPHP1','NPHP3','NPHP4','AHI1','IQCB1','SDCCAG8','INVS','NEK8'],
-    'Basal Body / Centriole': ['OFD1','CEP55','CEP78','CEP83','CEP104','CEP120','CEP250','KIF14','POC1B','C2CD3'],
-    'Motor Complexes': ['DYNC2H1','DYNC2LI1','KIF3B','KIF7'],
-    'Signaling Pathways (Hedgehog, PKD, etc.)': ['SMO','SUFU','ARL13B','INPP5E','PKD1','PKD2'],
-    'CPLANE Complex': ['INTU'],
-    'Axoneme': ['DNAH5','DNAI1','DNAAF2','DNAAF3','CFAP53','CFAP70','CFAP43','CFAP100','CFAP206','CFAP126','CFAP298','CFAP300','CFAP97','CFAP99','CFAP57','CFAP157'],
-    'Ciliogenesis': ['DEUP1','MCIDAS','TMEM17','PRPF6','PRPF8','PRPF31'],
-    'Phototransduction': ['RHO','GNAT1','GNAT2','GNB3','PDE6A','PDE6B','PDE6G','PDE6C','CNGA1','GRK1','SAG','GUCY2D','GUCA1A']
-}
-
-def get_functional_module(gene_symbol):
-    for module, genes in FUNCTIONAL_MODULES.items():
-        if gene_symbol.upper() in [g.upper() for g in genes]:
-            return module
-    return 'Other Ciliary Proteins'
-
-# Добавляем модули в основные таблицы
-axis_scores['Functional_Module'] = axis_scores.index.map(get_functional_module)
-total_score_df = total_score.to_frame(name='Total_score')
-total_score_df['Functional_Module'] = total_score_df.index.map(get_functional_module)
-pleiotropy_df = pleiotropy.to_frame(name='Pleiotropy')
-pleiotropy_df['Functional_Module'] = pleiotropy_df.index.map(get_functional_module)
-
-# ============================================================
-# 9. КЛАСТЕРИЗАЦИЯ
-# ============================================================
-axis_filled = axis_scores[axes].fillna(0)   # без колонки Functional_Module
-scaler = StandardScaler()
-scaled = scaler.fit_transform(axis_filled)
-k = 9
-kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-clusters = kmeans.fit_predict(scaled)
-axis_scores['Cluster'] = clusters
-total_score_df['Cluster'] = clusters
-
-# ============================================================
-# 10. СОХРАНЕНИЕ ОБНОВЛЁННОГО EXCEL (добавляем новые листы)
-# ============================================================
-with pd.ExcelWriter(file_name, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-    axis_scores.to_excel(writer, sheet_name='axis_scores_full_ont')
-    total_score_df.to_excel(writer, sheet_name='total_score_full_ont')
-    pleiotropy_df.to_excel(writer, sheet_name='pleiotropy_full_ont')
-    pd.DataFrame.from_dict(term_to_axis, orient='index', columns=['Axis']).to_excel(writer, sheet_name='term_axis_full_ont')
-    # Дополнительный лист с функциональными модулями
-    module_df = total_score_df[['Functional_Module']].copy()
-    module_df.to_excel(writer, sheet_name='functional_modules')
-
-print("✅ Обновлённые листы сохранены:")
-print("   - axis_scores_full_ont (с колонками осей + Functional_Module + Cluster)")
-print("   - total_score_full_ont (Total_score + Functional_Module + Cluster)")
-print("   - pleiotropy_full_ont (Pleiotropy + Functional_Module)")
-print("   - term_axis_full_ont")
-print("   - functional_modules (список генов и их модулей)")
-
-# ============================================================
-# 11. ВИЗУАЛИЗАЦИИ
-# ============================================================
-# Гистограмма Total_score
-plt.figure(figsize=(10,6))
-sns.histplot(total_score.dropna(), bins=20, kde=True, color='steelblue')
-plt.xlabel('Total_score')
-plt.ylabel('Количество генов')
-plt.title('Распределение Total_score (полная онтология, без порога)')
-plt.tight_layout()
-plt.savefig('total_score_histogram_full_ont.png', dpi=300)
-plt.show()
-
-# Тепловая карта осей (отсортировано по Total_score)
-order = total_score.sort_values(ascending=False).index
-axis_sorted = axis_scores.loc[order, axes]
-plt.figure(figsize=(12,10))
-sns.heatmap(axis_sorted, cmap='viridis', cbar_kws={'label': 'Балл по оси'})
-plt.title('Тепловая карта осей (гены отсортированы по Total_score)')
-plt.tight_layout()
-plt.savefig('axis_heatmap_full_ont.png', dpi=300)
-plt.show()
-
-# PCA с окраской по кластеру
-pca = PCA(n_components=2)
-pca_result = pca.fit_transform(scaled)
-plt.figure(figsize=(10,8))
-scatter = plt.scatter(pca_result[:,0], pca_result[:,1], c=clusters, cmap='tab10', alpha=0.7)
-plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
-plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
-plt.title('PCA-проекция генов, окрашенных по кластерам')
-plt.colorbar(scatter, label='Кластер')
-plt.tight_layout()
-plt.savefig('pca_clusters_full_ont.png', dpi=300)
-plt.show()
-
-# PCA с окраской по функциональному модулю (дополнительно)
-modules = axis_scores['Functional_Module'].values
-unique_modules = list(axis_scores['Functional_Module'].unique())
-module_colors = {mod: plt.cm.tab20(i % 20) for i, mod in enumerate(unique_modules)}
-colors = [module_colors[mod] for mod in modules]
-plt.figure(figsize=(12,10))
-scatter = plt.scatter(pca_result[:,0], pca_result[:,1], c=colors, alpha=0.7)
-handles = [plt.Line2D([0],[0], marker='o', color='w', markerfacecolor=module_colors[mod], markersize=8, label=mod) for mod in unique_modules]
-plt.legend(handles=handles, bbox_to_anchor=(1.05,1), loc='upper left')
-plt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%})')
-plt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%})')
-plt.title('PCA-проекция генов, окрашенных по функциональному модулю')
-plt.tight_layout()
-plt.savefig('pca_modules_full_ont.png', dpi=300)
-plt.show()
-
-# ============================================================
-# 12. ВАЛИДАЦИЯ С ЛЕТАЛЬНОСТЬЮ (если есть)
-# ============================================================
-lethality_file = "lethality.csv"
-if os.path.exists(lethality_file):
-    leth = pd.read_csv(lethality_file)
-    leth['gene'] = leth['gene'].str.upper().str.strip()
-    merged = pd.merge(total_score_df, leth, left_index=True, right_on='gene', how='inner')
-    if len(merged) > 1:
-        cat_map = {
-            'prenatal': 4, 'neonatal': 3, 'infantile': 2,
-            'childhood': 1, 'juvenile': 1, 'adult': 0, 'young adult': 0,
-            'none': 0, 'variable': np.nan
-        }
-        merged['lethality_score'] = merged['category'].str.lower().map(cat_map)
-        merged_valid = merged.dropna(subset=['lethality_score'])
-        if len(merged_valid) > 1:
-            rho, pval = spearmanr(merged_valid['Total_score'], merged_valid['lethality_score'])
-            print(f"📊 Корреляция Спирмена: ρ = {rho:.3f}, p = {pval:.4e} (n={len(merged_valid)})")
-            median_score = merged_valid['Total_score'].median()
-            merged_valid['high_score'] = merged_valid['Total_score'] > median_score
-            merged_valid['lethal'] = merged_valid['lethality_score'] >= 2
-            table = pd.crosstab(merged_valid['high_score'], merged_valid['lethal'])
-            if table.shape == (2,2):
-                oddsratio, p_fisher = fisher_exact(table.values)
-                print(f"📊 Точный тест Фишера: OR = {oddsratio:.2f}, p = {p_fisher:.4e}")
-
-# ============================================================
-# 13. СКАЧИВАНИЕ ОБНОВЛЁННОГО ФАЙЛА
-# ============================================================
 try:
-    from google.colab import files
-    files.download(file_name)
-    print("📥 Файл обновлён и скачан.")
+    with gzip.open(genes_pheno_path, 'rt', encoding='utf-8') as f:
+        f.readline()
+    is_gzip = True
 except:
-    print(f"✅ Готовый файл: {file_name}")
+    is_gzip = False
+
+if is_gzip:
+    df_gene_pheno = pd.read_csv(genes_pheno_path, sep='\t', dtype=str,
+                                compression='gzip', on_bad_lines='skip', comment='#')
+else:
+    df_gene_pheno = pd.read_csv(genes_pheno_path, sep='\t', dtype=str,
+                                on_bad_lines='skip', comment='#')
+
+df_gene_pheno.columns = df_gene_pheno.columns.str.strip()
+
+def find_col(df, keywords):
+    for col in df.columns:
+        col_lower = col.lower().replace(' ', '_').replace('-', '_')
+        if all(kw in col_lower for kw in keywords):
+            return col
+    return None
+
+gene_col = find_col(df_gene_pheno, ['gene', 'symbol']) or find_col(df_gene_pheno, ['entrez', 'symbol'])
+hpo_col = find_col(df_gene_pheno, ['hpo', 'id'])
+freq_col = find_col(df_gene_pheno, ['freq'])
+disease_col = find_col(df_gene_pheno, ['disease', 'id'])
+
+df_gene_pheno = df_gene_pheno.rename(columns={
+    gene_col: 'GeneSymbol', hpo_col: 'HPO_ID', freq_col: 'Frequency',
+    disease_col: 'DiseaseID'
+})
+
+df_gene_pheno = df_gene_pheno[['GeneSymbol', 'HPO_ID', 'Frequency', 'DiseaseID']].dropna()
+df_gene_pheno['GeneSymbol'] = df_gene_pheno['GeneSymbol'].str.upper().str.strip()
+df_gene_pheno['HPO_ID'] = df_gene_pheno['HPO_ID'].str.strip()
+df_gene_pheno['DiseaseID'] = df_gene_pheno['DiseaseID'].str.strip()
+
+df_gene_pheno = df_gene_pheno[df_gene_pheno['GeneSymbol'].isin(GENE_LIST)]
+
+def map_frequency_to_score(freq_str):
+    if not isinstance(freq_str, str):
+        return 0
+    s = freq_str.strip().lower()
+    if 'obligate' in s: return 4
+    if 'very frequent' in s: return 3
+    if 'frequent' in s: return 2
+    if 'occasional' in s: return 1
+    if 'very rare' in s: return 0
+    if 'rare' in s: return 0
+    if 'excluded' in s: return 0
+    match = re.match(r'(\d+)\s*/\s*(\d+)', s)
+    if match:
+        num, den = int(match.group(1)), int(match.group(2))
+        if den > 0:
+            ratio = num / den
+            if ratio >= 0.8: return 3
+            elif ratio >= 0.3: return 2
+            elif ratio >= 0.05: return 1
+            else: return 0
+    logging.warning(f"Нестандартная частота: {freq_str}, -> 0")
+    return 0
+
+df_gene_pheno['Score'] = df_gene_pheno['Frequency'].apply(map_frequency_to_score)
+gene_hpo_score = df_gene_pheno.groupby(['GeneSymbol', 'HPO_ID'])['Score'].max().reset_index()
+
+# ============================================================
+# 3. ПОСТРОЕНИЕ МАТРИЦЫ ЧАСТОТ 0-4 ДЛЯ all_hpo_terms
+# ============================================================
+all_hpo_terms = list(set(h for lst in AXIS_TO_HPO.values() for h in lst))
+
+for term in set(gene_hpo_score['HPO_ID'].unique()).union(all_hpo_terms):
+    get_ancestors_cached(term, parents, ancestor_cache)
+
+gene_hpo_dict = defaultdict(lambda: defaultdict(int))
+for _, row in gene_hpo_score.iterrows():
+    gene = row['GeneSymbol']
+    hpo = row['HPO_ID']
+    score = row['Score']
+    gene_hpo_dict[gene][hpo] = max(gene_hpo_dict[gene][hpo], score)
+
+def compute_max_score_for_term(gene_annot, target_term):
+    max_score = 0
+    for annot_term, score in gene_annot.items():
+        if annot_term == target_term:
+            max_score = max(max_score, score)
+        else:
+            anc = ancestor_cache.get(annot_term, set())
+            if target_term in anc:
+                max_score = max(max_score, score)
+    return max_score
+
+mat_data = {}
+for gene in GENE_LIST:
+    gene_annot = gene_hpo_dict.get(gene, {})
+    row = {t: compute_max_score_for_term(gene_annot, t) for t in all_hpo_terms}
+    mat_data[gene] = row
+
+mat = pd.DataFrame.from_dict(mat_data, orient='index')
+mat = mat.reindex(columns=all_hpo_terms, fill_value=0)
+
+# ============================================================
+# 4. БИНАРИЗАЦИЯ И ВЗВЕШИВАНИЕ (ПОРОГ 2)
+# ============================================================
+binary_threshold = 2
+mat_binary = (mat >= binary_threshold).astype(int)
+
+weight_series = pd.Series({h: HPO_WEIGHT.get(h, 0) for h in mat.columns})
+mat_severity = mat_binary * weight_series
+
+# ============================================================
+# 5. АГРЕГАЦИЯ ПО 18 ОСЯМ (MAX)
+# ============================================================
+axis_scores_human = pd.DataFrame(index=mat.index)
+for axis, hpo_list in AXIS_TO_HPO.items():
+    cols = [h for h in hpo_list if h in mat_severity.columns]
+    if cols:
+        axis_scores_human[axis] = mat_severity[cols].max(axis=1)
+    else:
+        axis_scores_human[axis] = np.nan
+
+# Для осей летальности NaN → 0 (чтобы матрица была полностью числовой)
+axis_scores_human[['Lethality_KD_only', 'Lethality_Adult']] = \
+    axis_scores_human[['Lethality_KD_only', 'Lethality_Adult']].fillna(0)
+
+human_matrix = axis_scores_human
+logging.info(f"Человеческая матрица готова. Размер: {human_matrix.shape}")
+
+# ============================================================
+# 6. СОХРАНЕНИЕ
+# ============================================================
+output_excel = 'human_18axes_results.xlsx'
+with pd.ExcelWriter(output_excel, engine='openpyxl') as writer:
+    human_matrix.to_excel(writer, sheet_name='Human_18axes')
+    # Дополнительно сохраним промежуточные матрицы для проверки
+    mat.to_excel(writer, sheet_name='HPO_Frequency_0_4')
+    mat_binary.to_excel(writer, sheet_name='HPO_Binary_Threshold2')
+    mat_severity.to_excel(writer, sheet_name='HPO_Weighted_0_3')
+
+logging.info(f"Результаты сохранены в {output_excel}")
+print("Готово! Человеческая матрица 18 осей построена.")
