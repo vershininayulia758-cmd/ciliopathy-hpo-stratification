@@ -1,0 +1,486 @@
+# ============================================================
+# 1. Установка библиотек (для Colab)
+# ============================================================
+!pip install -q requests pandas openpyxl tqdm datasets
+
+import os
+import requests
+import pandas as pd
+import numpy as np
+import re
+import time
+from tqdm.auto import tqdm
+from typing import List, Dict, Optional, Tuple
+from collections import defaultdict, Counter
+
+# ============================================================
+# 2. Запрос Excel-файла с детальными HPO-терминами
+# ============================================================
+print("\n📁 Для улучшения HPO-покрытия вы можете загрузить Excel-файл с детальными терминами.")
+print("   Если файл отсутствует, нажмите Enter для пропуска.")
+excel_path = input("Введите путь к файлу (например, 'детальные термины HPO.xlsx') или оставьте пустым: ").strip()
+
+# Если в Colab и файл не указан, предложим загрузить через upload
+if not excel_path and 'google.colab' in str(get_ipython()):
+    try:
+        from google.colab import files
+        print("📤 Загрузите Excel-файл через диалог:")
+        uploaded = files.upload()
+        if uploaded:
+            excel_path = list(uploaded.keys())[0]
+            print(f"✅ Загружен файл: {excel_path}")
+    except:
+        pass
+
+# ============================================================
+# 3. Список генов (замените при необходимости)
+# ============================================================
+GENES = [
+    "ABCA12", "ABCA4", "ACOT13", "ACVR2A", "ACVR2B", "ADAMTS16", "ADAMTS5",
+    "ADAMTS6", "ADAMTS9", "ADGRV1", "AGBL5", "AHI1", "AHR", "AIPL1", "ALG5",
+    "ALG9", "ALMS1", "ANKFN1", "ANKS6", "ARF1", "ARHGEF11", "ARHGEF18",
+    "ARL13B", "ARL2BP", "ARL3", "ARL6", "ARMC9", "ARSG", "ATXN2", "B9D1",
+    "B9D2", "BBIP1", "BBS1", "BBS10", "BBS12", "BBS2", "BBS4", "BBS5",
+    "BBS7", "BBS9", "BEST1", "BMP4", "C2CD3", "C8ORF37", "CACNA1F",
+    "CACNA1G", "CACNB4", "CBY1", "CC2D2A", "CCDC103", "CCDC40", "CCDC65",
+    "CCT7", "CDH23", "CDHR1", "CEP104", "CEP120", "CEP192", "CEP250",
+    "CEP290", "CEP41", "CEP55", "CEP78", "CEP83", "CERKL", "CFAP298",
+    "CFAP300", "CFAP52", "CFAP53", "CFAP57", "CIB2", "CLCC1", "CLRN1",
+    "CNGA1", "COCH", "COL2A1", "CPLANE1", "CRB1", "CRHR1", "CSPP1",
+    "CTNNB1", "DAG1", "DCDC2", "DDX59", "DHCR7", "DHDDS", "DHX38",
+    "DNAAF1", "DNAAF2", "DNAJB11", "DRAM2", "DYNC2H1", "DYNC2LI1",
+    "DZIP1L", "ELOVL4", "EYS", "FAM149B1", "FAM161A", "FCYT", "FHAD1",
+    "FLCN", "FLRT1", "FN1", "FOXJ1", "FSCN2", "GANAB", "GATA1", "GATA2",
+    "GATA3", "GATA4", "GATA5", "GATA6", "GDF6", "GLI3", "GLIS2", "GNAS",
+    "GNB1", "GUCA1A", "GUCA1B", "GUCY1A1", "GUCY1B1", "GUCY2D", "HES7",
+    "HGSNAT", "HHIP", "HK1", "HNF1B", "HYLS1", "IDH3A", "IDH3B", "IFT122",
+    "IFT140", "IFT172", "IFT27", "IFT38", "IFT46", "IFT52", "IFT57",
+    "IFT74", "IFT80", "IFT81", "IFT88", "IMPDH1", "INPP5E", "INTU",
+    "INVS", "IQCB1", "ITGA5", "KCNJ13", "KIAA0586", "KIAA1549", "KIF14",
+    "KIF3B", "KIF7", "KLF2", "KLF5", "KLHL7", "LAMA1", "LBX1", "LCA5",
+    "LRAT", "LRRC6", "LRRCC1", "LZTFL1", "MAK", "MAPKBP1", "MEGF8",
+    "MERTK", "MIR145", "MKKS", "MKS1", "MYH6", "MYO7A", "NBL1", "NEK1",
+    "NEK2", "NEK8", "NME7", "NOP56", "NPHP1", "NPHP3", "NPHP4", "NPHP7",
+    "NR2E3", "NRL", "OCRL", "OFD1", "PACRG", "PARD6A", "PARD6B",
+    "PARD6G", "PAX6", "PCDH15", "PDE1A", "PDE6A", "PDE6B", "PDE6C",
+    "PDE6D", "PDE6G", "PDZD7", "PI4KB", "PIBF1", "PINK1", "PIP5K1A",
+    "PIP5K1B", "PIP5K1C", "PITPNM3", "PKD1", "PKD1L1", "PKD2", "PKD2L1",
+    "PMM2", "PNPLA6", "POC1B", "POMGNT1", "PRKACB", "PROK2", "PROM1",
+    "PRPF31", "PRPF4", "PRPF6", "PRPH2", "PTCH1", "PTGER2", "PTK7",
+    "RAB21", "RAB23", "RAB28", "RAD21", "RBP3", "RD3", "RDH12", "REEP6",
+    "RET", "RGR", "RHO", "RIBC1", "RIMS1", "RP2", "RPE65", "RPGR",
+    "RPGRIP1", "RPGRIP1L", "RSPH3", "RSPH4A", "RTN4IP1", "RUVBL1",
+    "SAG", "SAXO2", "SCLT1", "SDCCAG8", "SLC7A14", "SMO", "SNAP29",
+    "SNRNP200", "STAT3", "SUFU", "TAPT1", "TCTN1", "TCTN2", "TMEM107",
+    "TMEM138", "TMEM216", "TMEM218", "TMEM231", "TMEM237", "TMEM67",
+    "TMEM88", "TMOD4", "TNNT2", "TOGARAM1", "TOPORS", "TRAF3IP1",
+    "TRAPPC11", "TRIM32", "TRPV4", "TSC1", "TTC12", "TTC21B", "TTC8",
+    "TTLL5", "TULP3", "TXNDC15", "USH1C", "USH1G", "USH2A", "USP45",
+    "WDPCP", "WDR19", "WDR35", "XPNPEP3", "ZIC2", "ZIC3", "ZMYND12",
+    "ZNF408", "ZNF423", "ZNF513", "ZRSR2"
+]
+
+print(f"✅ Загружено {len(GENES)} генов")
+
+# ============================================================
+# 4. Загрузка HPO данных (официальный файл)
+# ============================================================
+HPO_URL = "http://purl.obolibrary.org/obo/hp/hpoa/phenotype_to_genes.txt"
+hpo_file = "phenotype_to_genes.txt"
+
+if not os.path.exists(hpo_file):
+    print(f"Скачивание HPO файла {HPO_URL}...")
+    resp = requests.get(HPO_URL, stream=True)
+    with open(hpo_file, 'wb') as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
+    print("Скачано.")
+else:
+    print("HPO файл уже существует.")
+
+# Чтение с определением столбцов
+hpo_df = pd.read_csv(hpo_file, sep='\t', comment='#', dtype=str, low_memory=False)
+print(f"Всего строк в HPO файле: {len(hpo_df)}")
+print("Доступные столбцы:", hpo_df.columns.tolist())
+
+# Определим названия столбцов (автоматически)
+gene_col = None
+hpo_id_col = None
+hpo_term_col = None
+freq_col = None
+
+for col in hpo_df.columns:
+    col_lower = col.lower()
+    if 'gene_symbol' in col_lower or 'gene' in col_lower:
+        gene_col = col
+    if 'hpo_id' in col_lower:
+        hpo_id_col = col
+    if 'hpo_term' in col_lower or 'hpo_name' in col_lower or 'term_name' in col_lower:
+        hpo_term_col = col
+    if 'frequency' in col_lower:
+        freq_col = col
+
+if gene_col is None:
+    raise ValueError("Не найден столбец с генами. Доступные столбцы: " + ", ".join(hpo_df.columns))
+if hpo_id_col is None:
+    raise ValueError("Не найден столбец с HPO ID.")
+if hpo_term_col is None:
+    raise ValueError("Не найден столбец с названием HPO-термина.")
+if freq_col is None:
+    # Если нет столбца частоты, создадим фиктивный
+    freq_col = 'frequency'
+    hpo_df[freq_col] = 'Not specified'
+
+print(f"Используются столбцы: gene='{gene_col}', hpo_id='{hpo_id_col}', term='{hpo_term_col}', freq='{freq_col}'")
+
+# Фильтрация по нашим генам
+hpo_filtered = hpo_df[hpo_df[gene_col].str.upper().isin([g.upper() for g in GENES])].copy()
+print(f"Найдено HPO аннотаций для наших генов: {len(hpo_filtered)}")
+
+# Создание списка уникальных HPO терминов на ген (из официального HPO)
+hpo_by_gene = defaultdict(list)
+for _, row in hpo_filtered.iterrows():
+    gene = str(row[gene_col]).strip().upper()
+    hpo_id = str(row[hpo_id_col]).strip()
+    hpo_name = str(row[hpo_term_col]).strip()
+    freq = str(row[freq_col]).strip() if pd.notna(row[freq_col]) else 'Not specified'
+    if freq == '' or freq == 'nan':
+        freq = 'Not specified'
+    
+    # Преобразование частоты в вес (как в оригинале)
+    freq_weight = {
+        'Obligate': 1.0,
+        'Very frequent': 0.8,
+        'Frequent': 0.5,
+        'Occasional': 0.2,
+        'Very rare': 0.1,
+        'Not specified': 0.5
+    }.get(freq, 0.5)
+    
+    hpo_by_gene[gene].append({
+        'hpo_id': hpo_id,
+        'hpo_term': hpo_name,
+        'frequency': freq,
+        'frequency_weight': freq_weight,
+        'source': 'HPO'
+    })
+
+print(f"Генов с HPO аннотациями (из официального источника): {len(hpo_by_gene)}")
+
+# ============================================================
+# 5. Загрузка дополнительных HPO из Excel-файла (если предоставлен)
+# ============================================================
+if excel_path and os.path.exists(excel_path):
+    try:
+        df_excel = pd.read_excel(excel_path, sheet_name="Детальные термины", dtype=str)
+        print(f"✅ Загружено {len(df_excel)} записей из Excel-файла")
+        
+        excel_hpo = defaultdict(list)
+        for _, row in df_excel.iterrows():
+            gene = str(row['gene_symbol']).strip().upper()
+            if gene not in GENES:
+                continue
+            hpo_id = str(row['hpo_id']).strip()
+            hpo_name = str(row['hpo_name']).strip()
+            category = str(row['category']).strip() if pd.notna(row['category']) else ''
+            freq = str(row['frequency']).strip() if pd.notna(row['frequency']) else 'Not specified'
+            freq_score = float(row['frequency_score']) if pd.notna(row['frequency_score']) else 0.5
+            
+            excel_hpo[gene].append({
+                'hpo_id': hpo_id,
+                'hpo_term': hpo_name,
+                'frequency': freq,
+                'frequency_weight': freq_score,
+                'source': 'Excel_HPO',
+                'category': category
+            })
+        
+        print(f"Из Excel получено {sum(len(v) for v in excel_hpo.values())} записей для {len(excel_hpo)} генов")
+        
+        # Объединение с официальными HPO-данными (дедупликация по hpo_id внутри гена)
+        for gene, entries in excel_hpo.items():
+            if gene in hpo_by_gene:
+                existing_ids = {e['hpo_id'] for e in hpo_by_gene[gene]}
+                for e in entries:
+                    if e['hpo_id'] not in existing_ids:
+                        hpo_by_gene[gene].append(e)
+                        existing_ids.add(e['hpo_id'])
+            else:
+                hpo_by_gene[gene] = entries
+        
+        print(f"После объединения с Excel: {len(hpo_by_gene)} генов с HPO-аннотациями")
+    except Exception as e:
+        print(f"⚠️ Ошибка при обработке Excel-файла: {e}")
+else:
+    print("ℹ️ Excel-файл не загружен или не найден. Используем только официальный HPO.")
+
+# ============================================================
+# 6. Загрузка GeneReviews
+# ============================================================
+print("Загрузка датасета GeneReviews...")
+from datasets import load_dataset
+
+try:
+    dataset = load_dataset("Tonic/GeneReviews", cache_dir="./cache")
+    gr_df = dataset["train"].to_pandas()
+    print(f"Загружено глав GeneReviews: {len(gr_df)}")
+except Exception as e:
+    print(f"Ошибка загрузки GeneReviews: {e}")
+    gr_df = pd.DataFrame()
+
+# ============================================================
+# 7. Функции парсинга GeneReviews (без изменений)
+# ============================================================
+def clean_text(text):
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def extract_clinical_section(content):
+    text = clean_text(content)
+    start_patterns = [
+        r'Clinical\s+Characteristics',
+        r'Clinical\s+Manifestations',
+        r'Clinical\s+Features',
+        r'Clinical\s+Description'
+    ]
+    start_pos = -1
+    for pat in start_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            start_pos = m.end()
+            break
+    if start_pos == -1:
+        return ""
+    
+    end_markers = [
+        'Diagnosis', 'Management', 'Genetic Counseling',
+        'Molecular Genetics', 'References', 'Summary',
+        'Differential Diagnosis', 'Prevalence'
+    ]
+    end_pos = len(text)
+    for marker in end_markers:
+        idx = text.find(marker, start_pos)
+        if idx != -1:
+            end_pos = min(end_pos, idx)
+    return text[start_pos:end_pos].strip()
+
+def extract_frequency_sentences(section_text):
+    sentences = re.split(r'(?<=[.!?])\s+', section_text)
+    freq_patterns = [
+        r'\d+\s*[-–]\s*\d+\s*%',
+        r'\d+\s*%',
+        r'>\s*\d+\s*%',
+        r'<\s*\d+\s*%',
+        r'~\s*\d+\s*%',
+        r'\bmost\b', r'\bmajority\b', r'\bvirtually\s+all\b',
+        r'\bcore\s+feature\b', r'\brare\b', r'\boccasional\b',
+        r'\ball\s+individuals\b', r'\btypically\b', r'\bcommonly\b'
+    ]
+    freq_sent = []
+    for sent in sentences:
+        sent = sent.strip()
+        if len(sent) < 10:
+            continue
+        if any(re.search(p, sent, re.IGNORECASE) for p in freq_patterns):
+            freq_sent.append(sent)
+    return freq_sent
+
+def extract_percent(sent):
+    m = re.search(r'(\d+)\s*%', sent)
+    return int(m.group(1)) if m else None
+
+def extract_freq_markers(sent):
+    markers = []
+    if re.search(r'\bmost\b|\bmajority\b|\bvirtually all\b|\ball individuals\b|\bcore feature\b', sent, re.I):
+        markers.append('HIGH')
+    if re.search(r'\brare\b|\boccasional\b|\bvery rare\b', sent, re.I):
+        markers.append('LOW')
+    if re.search(r'\btypically\b|\bcommonly\b', sent, re.I):
+        markers.append('MODERATE')
+    return ', '.join(markers) if markers else ''
+
+def classify_system(hpo_term, text, category_from_excel=''):
+    """Определяет систему органов. Если передана категория из Excel, использует её приоритетно."""
+    if category_from_excel:
+        return category_from_excel.lower()
+    
+    search = (hpo_term + ' ' + text).lower()
+    system_keywords = {
+        'neurological': ['brain', 'seizure', 'epilepsy', 'ataxia', 'cerebellar', 'cognitive', 'intellectual', 'mental retardation', 'developmental delay', 'hypotonia', 'spastic', 'neuro', 'encephalopathy', 'dystonia', 'tremor'],
+        'ocular': ['eye', 'vision', 'retina', 'retinal', 'cataract', 'glaucoma', 'blind', 'optic', 'nystagmus', 'strabismus', 'cornea', 'lens', 'fundus', 'photophobia', 'microphthalmia', 'coloboma', 'night blindness'],
+        'renal': ['kidney', 'renal', 'nephron', 'cyst', 'glomerulo', 'ureter', 'bladder', 'nephropathy', 'polyuria', 'proteinuria', 'hematuria', 'creatinine', 'dialysis', 'nephronophthisis'],
+        'cardiac': ['heart', 'cardiac', 'cardiomyopathy', 'arrhythmia', 'valve', 'septal', 'hypertrophy', 'palpitations', 'syncope', 'myocardium', 'conduction', 'aortic'],
+        'hepatic': ['liver', 'hepatic', 'hepat', 'cirrhosis', 'fibrosis', 'bile', 'jaundice', 'portal', 'transaminase', 'cholestasis', 'biliary'],
+        'pulmonary': ['lung', 'pulmonary', 'respiratory', 'breath', 'asthma', 'copd', 'pneumonia', 'trachea', 'bronchi', 'emphysema', 'cough', 'dyspnea'],
+        'skeletal': ['bone', 'skeleton', 'scoliosis', 'joint', 'arthritis', 'osteoporosis', 'fracture', 'short stature', 'limb', 'digit', 'polydactyly', 'syndactyly', 'cleft', 'cranio', 'brachydactyly'],
+        'muscular': ['muscle', 'myopathy', 'dystrophy', 'weakness', 'myalgia', 'atrophy', 'hypertrophy', 'creatine kinase', 'emg'],
+        'endocrine': ['thyroid', 'diabetes', 'insulin', 'hormone', 'pituitary', 'adrenal', 'growth', 'puberty', 'gonad', 'menstrual', 'obesity', 'metabolic', 'glucose'],
+        'dermatological': ['skin', 'rash', 'pigment', 'hair', 'nail', 'ichthyosis', 'erythema', 'vesicle', 'ulcer', 'scar', 'hyperkeratosis', 'alopecia', 'collodion'],
+        'immunological': ['immune', 'infection', 'autoimmune', 'allergy', 'antibody', 'lymphocyte', 'immuno', 'inflammation', 'sepsis'],
+        'ear': ['hearing', 'deafness', 'auditory', 'ear', 'vestibular', 'cochlea', 'otosclerosis', 'tinnitus']
+    }
+    scores = Counter()
+    for system, kws in system_keywords.items():
+        for kw in kws:
+            if kw in search:
+                scores[system] += 1
+    if scores:
+        return scores.most_common(1)[0][0]
+    return 'other'
+
+# ============================================================
+# 8. Обработка GeneReviews для наших генов
+# ============================================================
+gr_by_gene = defaultdict(list)
+
+if not gr_df.empty:
+    for idx, row in tqdm(gr_df.iterrows(), total=len(gr_df), desc="Парсинг GeneReviews"):
+        content = row.get('content', '')
+        if not content:
+            continue
+        keywords = row.get('keywords', '')
+        title = row.get('title', '')
+        if isinstance(keywords, list):
+            keywords_str = ' '.join(keywords)
+        else:
+            keywords_str = str(keywords)
+        if isinstance(title, list):
+            title_str = ' '.join(title)
+        else:
+            title_str = str(title)
+        
+        matched_genes = set()
+        for gene in GENES:
+            gene_upper = gene.upper()
+            if gene_upper in keywords_str.upper() or gene_upper in title_str.upper():
+                matched_genes.add(gene_upper)
+        
+        if not matched_genes:
+            continue
+        
+        section = extract_clinical_section(content)
+        if not section:
+            continue
+        
+        freq_sents = extract_frequency_sentences(section)
+        for sent in freq_sents:
+            percent = extract_percent(sent)
+            markers = extract_freq_markers(sent)
+            system = classify_system('', sent)
+            for gene in matched_genes:
+                gr_by_gene[gene].append({
+                    'gene': gene,
+                    'hpo_id': '',
+                    'hpo_term': '',
+                    'phenotype_text': sent,
+                    'frequency': '',
+                    'percent': percent,
+                    'frequency_markers': markers,
+                    'source': 'GeneReviews',
+                    'system': system
+                })
+    print(f"Генов с GeneReviews описаниями: {len(gr_by_gene)}")
+
+# ============================================================
+# 9. Объединение данных HPO (включая Excel) и GeneReviews
+# ============================================================
+all_records = []
+
+# HPO записи (уже объединены с Excel)
+for gene, entries in hpo_by_gene.items():
+    for e in entries:
+        category_from_excel = e.get('category', '')
+        system = classify_system(e['hpo_term'], '', category_from_excel)
+        all_records.append({
+            'gene': gene,
+            'hpo_id': e['hpo_id'],
+            'hpo_term': e['hpo_term'],
+            'phenotype_text': '',
+            'frequency': e['frequency'],
+            'percent': None,
+            'frequency_markers': '',
+            'source': e.get('source', 'HPO'),
+            'system': system
+        })
+
+# GeneReviews записи
+for gene, entries in gr_by_gene.items():
+    all_records.extend(entries)
+
+# Дедупликация (по hpo_id или по тексту)
+unique_records = []
+seen = set()
+for rec in all_records:
+    if rec['hpo_id']:
+        key = rec['hpo_id']
+    else:
+        key = rec['phenotype_text'][:100]
+    if key not in seen:
+        seen.add(key)
+        unique_records.append(rec)
+
+df = pd.DataFrame(unique_records)
+print(f"Всего уникальных фенотипов: {len(df)}")
+
+# ============================================================
+# 10. Сводка по генам
+# ============================================================
+summary_rows = []
+for gene in GENES:
+    gene_upper = gene.upper()
+    hpo_count = len(hpo_by_gene.get(gene_upper, []))
+    gr_count = len(gr_by_gene.get(gene_upper, []))
+    total_records = hpo_count + gr_count
+    systems = set()
+    for rec in all_records:
+        if rec['gene'] == gene_upper:
+            systems.add(rec['system'])
+    systems_str = ', '.join(sorted(systems)) if systems else ''
+    summary_rows.append({
+        'gene': gene_upper,
+        'hpo_terms': hpo_count,
+        'genereviews_terms': gr_count,
+        'total_records': total_records,
+        'systems': systems_str,
+        'has_data': total_records > 0
+    })
+
+summary_df = pd.DataFrame(summary_rows)
+not_found = summary_df[~summary_df['has_data']]['gene'].tolist()
+print(f"Генов без данных: {len(not_found)}")
+
+# ============================================================
+# 11. Сохранение результатов в один Excel-файл с листами
+# ============================================================
+output_file = 'phenotypes_full.xlsx'
+with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+    df.to_excel(writer, sheet_name='Детальные фенотипы', index=False)
+    summary_df.to_excel(writer, sheet_name='Сводка по генам', index=False)
+    pd.DataFrame({'gene': not_found}).to_excel(writer, sheet_name='Ненайденные гены', index=False)
+    
+    # Дополнительный лист со статистикой
+    stats_data = {
+        'Параметр': [
+            'Всего генов',
+            'Генов с HPO (включая Excel)',
+            'Генов с GeneReviews',
+            'Всего фенотипов (уникальных)',
+            'Уникальных HPO-терминов',
+            'Генов без данных'
+        ],
+        'Значение': [
+            len(GENES),
+            len(hpo_by_gene),
+            len(gr_by_gene),
+            len(df),
+            df[df['hpo_id'] != '']['hpo_id'].nunique() if 'hpo_id' in df.columns else 0,
+            len(not_found)
+        ]
+    }
+    stats_df = pd.DataFrame(stats_data)
+    stats_df.to_excel(writer, sheet_name='Статистика', index=False)
+
+print(f"\n✅ Все данные сохранены в файл: {output_file}")
+print(f"   Листы: 'Детальные фенотипы', 'Сводка по генам', 'Ненайденные гены', 'Статистика'")
+print("   Скачайте этот файл для дальнейшего анализа.")
