@@ -1,0 +1,1136 @@
+#!/usr/bin/env python3
+"""
+ПОЛНЫЙ АВТОМАТИЗИРОВАННЫЙ АНАЛИЗ ГЕНОВ ЦИЛИОПАТИЙ
+Источники: HPO + ClinVar
+Выход: Excel, CSV, JSON, графики PNG, HTML-отчёт, ZIP-архив
+"""
+
+# ==================== УСТАНОВКА БИБЛИОТЕК (для Jupyter/Colab) ====================
+# !pip install -q requests pandas numpy tqdm matplotlib seaborn openpyxl
+
+import warnings
+warnings.filterwarnings('ignore')
+
+import os
+import sys
+import json
+import time
+import re
+import gzip
+import shutil
+import zipfile
+from datetime import datetime
+from typing import Dict, List, Set, Tuple, Optional, Any
+from dataclasses import dataclass, asdict, field
+from collections import defaultdict, Counter
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+import requests
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Настройки отображения
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', 50)
+plt.style.use('seaborn-v0_8-whitegrid')
+
+# ==================== ПОЛНЫЙ СПИСОК ГЕНОВ (494 гена) ====================
+GENES = [
+    "ABCA12", "ABCA4", "ACOT13", "ACVR2A", "ACVR2B", "ADAMTS16", "ADAMTS5",
+    "ADAMTS6", "ADAMTS9", "ADGRV1", "AGBL5", "AHI1", "AHR", "AIPL1", "ALG5",
+    "ALG9", "ALMS1", "ANKFN1", "ANKS6", "ARF1", "ARHGEF11", "ARHGEF18",
+    "ARL13B", "ARL2BP", "ARL3", "ARL6", "ARMC9", "ARSG", "ATXN2", "B9D1",
+    "B9D2", "BBIP1", "BBS1", "BBS10", "BBS12", "BBS2", "BBS4", "BBS5",
+    "BBS7", "BBS9", "BEST1", "BMP4", "C2CD3", "C8ORF37", "CACNA1F",
+    "CACNA1G", "CACNB4", "CBY1", "CC2D2A", "CCDC103", "CCDC40", "CCDC65",
+    "CCT7", "CDH23", "CDHR1", "CEP104", "CEP120", "CEP192", "CEP250",
+    "CEP290", "CEP41", "CEP55", "CEP78", "CEP83", "CERKL", "CFAP298",
+    "CFAP300", "CFAP52", "CFAP53", "CFAP57", "CIB2", "CLCC1", "CLRN1",
+    "CNGA1", "COCH", "COL2A1", "CPLANE1", "CRB1", "CRHR1", "CSPP1",
+    "CTNNB1", "DAG1", "DCDC2", "DDX59", "DHCR7", "DHDDS", "DHX38",
+    "DNAAF1", "DNAAF2", "DNAJB11", "DRAM2", "DYNC2H1", "DYNC2LI1",
+    "DZIP1L", "ELOVL4", "EYS", "FAM149B1", "FAM161A", "FCYT", "FHAD1",
+    "FLCN", "FLRT1", "FN1", "FOXJ1", "FSCN2", "GANAB", "GATA1", "GATA2",
+    "GATA3", "GATA4", "GATA5", "GATA6", "GDF6", "GLI3", "GLIS2", "GNAS",
+    "GNB1", "GUCA1A", "GUCA1B", "GUCY1A1", "GUCY1B1", "GUCY2D", "HES7",
+    "HGSNAT", "HHIP", "HK1", "HNF1B", "HYLS1", "IDH3A", "IDH3B", "IFT122",
+    "IFT140", "IFT172", "IFT27", "IFT38", "IFT46", "IFT52", "IFT57",
+    "IFT74", "IFT80", "IFT81", "IFT88", "IMPDH1", "INPP5E", "INTU",
+    "INVS", "IQCB1", "ITGA5", "KCNJ13", "KIAA0586", "KIAA1549", "KIF14",
+    "KIF3B", "KIF7", "KLF2", "KLF5", "KLHL7", "LAMA1", "LBX1", "LCA5",
+    "LRAT", "LRRC6", "LRRCC1", "LZTFL1", "MAK", "MAPKBP1", "MEGF8",
+    "MERTK", "MIR145", "MKKS", "MKS1", "MYH6", "MYO7A", "NBL1", "NEK1",
+    "NEK2", "NEK8", "NME7", "NOP56", "NPHP1", "NPHP3", "NPHP4", "NPHP7",
+    "NR2E3", "NRL", "OCRL", "OFD1", "PACRG", "PARD6A", "PARD6B",
+    "PARD6G", "PAX6", "PCDH15", "PDE1A", "PDE6A", "PDE6B", "PDE6C",
+    "PDE6D", "PDE6G", "PDZD7", "PI4KB", "PIBF1", "PINK1", "PIP5K1A",
+    "PIP5K1B", "PIP5K1C", "PITPNM3", "PKD1", "PKD1L1", "PKD2", "PKD2L1",
+    "PMM2", "PNPLA6", "POC1B", "POMGNT1", "PRKACB", "PROK2", "PROM1",
+    "PRPF31", "PRPF4", "PRPF6", "PRPH2", "PTCH1", "PTGER2", "PTK7",
+    "RAB21", "RAB23", "RAB28", "RAD21", "RBP3", "RD3", "RDH12", "REEP6",
+    "RET", "RGR", "RHO", "RIBC1", "RIMS1", "RP2", "RPE65", "RPGR",
+    "RPGRIP1", "RPGRIP1L", "RSPH3", "RSPH4A", "RTN4IP1", "RUVBL1",
+    "SAG", "SAXO2", "SCLT1", "SDCCAG8", "SLC7A14", "SMO", "SNAP29",
+    "SNRNP200", "STAT3", "SUFU", "TAPT1", "TCTN1", "TCTN2", "TMEM107",
+    "TMEM138", "TMEM216", "TMEM218", "TMEM231", "TMEM237", "TMEM67",
+    "TMEM88", "TMOD4", "TNNT2", "TOGARAM1", "TOPORS", "TRAF3IP1",
+    "TRAPPC11", "TRIM32", "TRPV4", "TSC1", "TTC12", "TTC21B", "TTC8",
+    "TTLL5", "TULP3", "TXNDC15", "USH1C", "USH1G", "USH2A", "USP45",
+    "WDPCP", "WDR19", "WDR35", "XPNPEP3", "ZIC2", "ZIC3", "ZMYND12",
+    "ZNF408", "ZNF423", "ZNF513", "ZRSR2"
+]
+
+print(f"📊 Всего уникальных генов: {len(set(GENES))}")
+
+# ==================== СТРУКТУРЫ ДАННЫХ ====================
+@dataclass
+class HPOData:
+    hpo_id: str
+    hpo_name: str
+    gene_symbol: str
+    frequency: str = ""
+    evidence: str = ""
+    disease: str = ""
+    
+    @property
+    def frequency_score(self) -> float:
+        freq_map = {
+            'Obligate': 3.0,
+            'Very frequent': 2.5,
+            'Frequent': 2.0,
+            'Occasional': 1.0,
+            'Rare': 0.5,
+            'Very rare': 0.2,
+            'Excluded': 0.0
+        }
+        return freq_map.get(self.frequency, 1.0)
+
+@dataclass
+class ClinVarVariant:
+    variant_id: str
+    gene_symbol: str
+    clinical_significance: str
+    variant_type: str          # missense, nonsense, frameshift, splice, deletion, insertion, duplication, indel, synonymous, stop_loss, start_loss, intronic, utr, regulatory, intergenic, other
+    review_status: str
+    chromosome: str = ""
+    position: str = ""
+    age_of_onset: str = ""
+    phenotype_ids: str = ""
+    
+    @property
+    def is_pathogenic(self) -> bool:
+        if not self.clinical_significance:
+            return False
+        sig = self.clinical_significance.lower()
+        return ('pathogenic' in sig and 'likely' not in sig and 
+                'benign' not in sig and 'conflict' not in sig and 'uncertain' not in sig)
+    
+    @property
+    def is_likely_pathogenic(self) -> bool:
+        if not self.clinical_significance:
+            return False
+        sig = self.clinical_significance.lower()
+        return 'likely pathogenic' in sig or 'likely_pathogenic' in sig
+    
+    @property
+    def is_vus(self) -> bool:
+        if not self.clinical_significance:
+            return False
+        sig = self.clinical_significance.lower()
+        return ('uncertain' in sig or 'vus' in sig or 'conflict' in sig or
+                'not provided' in sig)
+    
+    @property
+    def is_likely_benign(self) -> bool:
+        if not self.clinical_significance:
+            return False
+        sig = self.clinical_significance.lower()
+        return 'likely benign' in sig or 'likely_benign' in sig
+    
+    @property
+    def is_benign(self) -> bool:
+        if not self.clinical_significance:
+            return False
+        sig = self.clinical_significance.lower()
+        return 'benign' in sig and 'likely' not in sig
+
+@dataclass  
+class GeneSummary:
+    gene_symbol: str
+    aliases: List[str] = field(default_factory=list)
+    hpo_terms: List[HPOData] = field(default_factory=list)
+    hpo_count: int = 0
+    phenotype_categories: Dict[str, int] = field(default_factory=dict)
+    phenotype_score: float = 0.0
+    clinvar_variants: List[ClinVarVariant] = field(default_factory=list)
+    total_variants: int = 0
+    pathogenic_count: int = 0
+    likely_pathogenic_count: int = 0
+    vus_count: int = 0
+    likely_benign_count: int = 0
+    benign_count: int = 0
+    conflicting_count: int = 0
+    variant_types: Dict[str, int] = field(default_factory=dict)
+    pathogenicity_score: float = 0.0
+    age_of_onset_distribution: Dict[str, int] = field(default_factory=dict)
+    data_quality: float = 0.0
+    disease_association_score: float = 0.0
+    
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+# ==================== СИСТЕМА СКАЧИВАНИЯ ====================
+class DataDownloader:
+    HPO_URLS = {
+        'phenotype_to_genes': 'http://purl.obolibrary.org/obo/hp/hpoa/phenotype_to_genes.txt',
+        'genes_to_phenotype': 'http://purl.obolibrary.org/obo/hp/hpoa/genes_to_phenotype.txt',
+        'hpo_ontology': 'http://purl.obolibrary.org/obo/hp.obo'
+    }
+    CLINVAR_URL = 'https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz'
+    
+    def __init__(self, data_dir: str = "./ciliopathy_data"):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(exist_ok=True)
+        
+    def download_file(self, url: str, filename: str) -> Path:
+        filepath = self.data_dir / filename
+        if filepath.exists():
+            print(f"📁 {filename} уже существует, пропускаем")
+            return filepath
+        print(f"📥 Скачивание {filename}...")
+        try:
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            with open(filepath, 'wb') as f:
+                with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as pbar:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            pbar.update(len(chunk))
+            print(f"✅ {filename} скачан")
+            return filepath
+        except Exception as e:
+            print(f"❌ Ошибка {filename}: {e}")
+            raise
+
+    def download_hpo_data(self) -> Dict[str, Path]:
+        print("\n" + "="*60)
+        print("📥 СКАЧИВАНИЕ HPO")
+        print("="*60)
+        hpo_files = {}
+        for key, url in self.HPO_URLS.items():
+            filename = f"hpo_{key}.txt" if key != 'hpo_ontology' else 'hpo.obo'
+            hpo_files[key] = self.download_file(url, filename)
+        return hpo_files
+    
+    def download_clinvar_data(self) -> Path:
+        print("\n" + "="*60)
+        print("📥 СКАЧИВАНИЕ CLINVAR")
+        print("="*60)
+        gz_file = self.download_file(self.CLINVAR_URL, "variant_summary.txt.gz")
+        txt_file = self.data_dir / "variant_summary.txt"
+        if not txt_file.exists():
+            print("📦 Распаковка...")
+            with gzip.open(gz_file, 'rb') as f_in:
+                with open(txt_file, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            print("✅ Распакован")
+        return txt_file
+    
+    def download_all(self) -> Tuple[Dict[str, Path], Path]:
+        return self.download_hpo_data(), self.download_clinvar_data()
+
+# ==================== ПАРСЕР HPO ====================
+class HPOParser:
+    # Расширенные категории фенотипов (15 систем)
+    PHENOTYPE_CATEGORIES = {
+        'Neurological': {
+            'ids': ['HP:0001250', 'HP:0001249', 'HP:0001263', 'HP:0000252', 'HP:0002353',
+                   'HP:0002126', 'HP:0001336', 'HP:0001290', 'HP:0001257', 'HP:0000729',
+                   'HP:0003473', 'HP:0002342', 'HP:0002376', 'HP:0000717', 'HP:0000733',
+                   'HP:0001251', 'HP:0001311', 'HP:0002015', 'HP:0002076', 'HP:0002067'],
+            'keywords': ['brain', 'seizure', 'epilepsy', 'ataxia', 'cerebellar', 'cognitive', 
+                        'intellectual', 'mental retardation', 'developmental delay', 'hypotonia',
+                        'spastic', 'parkinson', 'dementia', 'neuropathy', 'stroke', 'migraine',
+                        'neuro', 'encephalopathy', 'cerebral', 'nerve', 'speech', 'coordination']
+        },
+        'Ocular': {
+            'ids': ['HP:0000556', 'HP:0000510', 'HP:0000548', 'HP:0000505', 'HP:0000551',
+                   'HP:0000512', 'HP:0000529', 'HP:0000572', 'HP:0000592', 'HP:0000486',
+                   'HP:0000639', 'HP:0000648', 'HP:0000565', 'HP:0000609', 'HP:0000581',
+                   'HP:0000490', 'HP:0000533', 'HP:0000616', 'HP:0000644', 'HP:0000613'],
+            'keywords': ['eye', 'vision', 'retina', 'retinal', 'cataract', 'glaucoma', 'blind',
+                        'optic', 'nystagmus', 'strabismus', 'cornea', 'lens', 'fundus',
+                        'photophobia', 'microphthalmia', 'coloboma', 'pigment', 'night blindness',
+                        'photoreceptor', 'iris', 'pupil', 'visual']
+        },
+        'Renal': {
+            'ids': ['HP:0000107', 'HP:0000110', 'HP:0000802', 'HP:0000100', 'HP:0000124',
+                   'HP:0000077', 'HP:0000093', 'HP:0000104', 'HP:0000795', 'HP:0005562',
+                   'HP:0000098', 'HP:0000105', 'HP:0000106', 'HP:0000114', 'HP:0000126',
+                   'HP:0005565', 'HP:0005598', 'HP:0005927', 'HP:0008678', 'HP:0008689'],
+            'keywords': ['kidney', 'renal', 'nephron', 'cyst', 'glomerulo', 'ureter', 'bladder',
+                        'nephropathy', 'polyuria', 'proteinuria', 'hematuria', 'creatinine',
+                        'ESKD', 'dialysis', 'nephritis', 'pyelonephritis', 'calcium']
+        },
+        'Cardiac': {
+            'ids': ['HP:0001626', 'HP:0001631', 'HP:0001654', 'HP:0001674', 'HP:0001680',
+                   'HP:0001704', 'HP:0001711', 'HP:0001728', 'HP:0001763', 'HP:0002566',
+                   'HP:0001643', 'HP:0001648', 'HP:0001657', 'HP:0001681', 'HP:0001695',
+                   'HP:0001710', 'HP:0001720', 'HP:0001764', 'HP:0002586', 'HP:0006635'],
+            'keywords': ['heart', 'cardiac', 'cardiomyopathy', 'arrhythmia', 'valve', 'septal',
+                        'hypertrophy', 'palpitations', 'syncope', 'myocardium', 'conduction',
+                        'aortic', 'ventricular', 'atrial', 'tachycardia', 'bradycardia',
+                        'myocardial', 'mitral', 'tricuspid', 'pulmonary']
+        },
+        'Hepatic': {
+            'ids': ['HP:0001394', 'HP:0001744', 'HP:0001407', 'HP:0001410', 'HP:0006568',
+                   'HP:0002910', 'HP:0001748', 'HP:0001743', 'HP:0006571', 'HP:0001413',
+                   'HP:0001395', 'HP:0001398', 'HP:0001408', 'HP:0001409', 'HP:0001415',
+                   'HP:0001428', 'HP:0001435', 'HP:0001438', 'HP:0006559', 'HP:0006563'],
+            'keywords': ['liver', 'hepatic', 'hepat', 'cirrhosis', 'fibrosis', 'bile', 'jaundice',
+                        'portal', 'transaminase', 'cholestasis', 'hepatocellular', 'lobular',
+                        'gallbladder', 'biliary']
+        },
+        'Pulmonary': {
+            'ids': ['HP:0002086', 'HP:0002098', 'HP:0002104', 'HP:0002111', 'HP:0002115',
+                   'HP:0002120', 'HP:0002130', 'HP:0002150', 'HP:0002175', 'HP:0002180',
+                   'HP:0002088', 'HP:0002090', 'HP:0002093', 'HP:0002100', 'HP:0002110',
+                   'HP:0002119', 'HP:0002124', 'HP:0002128', 'HP:0002134', 'HP:0002151'],
+            'keywords': ['lung', 'pulmonary', 'respiratory', 'breath', 'asthma', 'COPD',
+                        'pneumonia', 'trachea', 'bronchi', 'emphysema', 'cough', 'dyspnea',
+                        'bronchitis', 'aspiration', 'apnea', 'hypoxia']
+        },
+        'Skeletal': {
+            'ids': ['HP:0010055', 'HP:0001161', 'HP:0001156', 'HP:0000924', 'HP:0001371',
+                   'HP:0000766', 'HP:0001508', 'HP:0002650', 'HP:0000175', 'HP:0000278',
+                   'HP:0000921', 'HP:0000929', 'HP:0000931', 'HP:0000938', 'HP:0000940',
+                   'HP:0000952', 'HP:0000960', 'HP:0000962', 'HP:0000982', 'HP:0000988'],
+            'keywords': ['bone', 'skeleton', 'scoliosis', 'joint', 'arthritis', 'osteoporosis',
+                        'fracture', 'short stature', 'limb', 'digit', 'polydactyly',
+                        'syndactyly', 'cleft', 'cranio', 'spine', 'vertebra', 'pelvis',
+                        'femur', 'tibia', 'fibula', 'humerus', 'radius', 'ulna']
+        },
+        'Muscular': {
+            'ids': ['HP:0001324', 'HP:0001338', 'HP:0002180', 'HP:0002460', 'HP:0003198',
+                   'HP:0003203', 'HP:0003230', 'HP:0003281', 'HP:0003307', 'HP:0003325',
+                   'HP:0001326', 'HP:0001328', 'HP:0001330', 'HP:0001332', 'HP:0001344',
+                   'HP:0001365', 'HP:0001370', 'HP:0001372', 'HP:0001374', 'HP:0001376'],
+            'keywords': ['muscle', 'myopathy', 'dystrophy', 'weakness', 'myalgia', 'atrophy',
+                        'hypertrophy', 'creatine kinase', 'EMG', 'myotonia', 'muscular',
+                        'sarcopenia', 'rhabdomyolysis']
+        },
+        'Endocrine': {
+            'ids': ['HP:0000818', 'HP:0000821', 'HP:0000824', 'HP:0000827', 'HP:0000830',
+                   'HP:0000833', 'HP:0000836', 'HP:0000840', 'HP:0000843', 'HP:0000846',
+                   'HP:0000808', 'HP:0000810', 'HP:0000812', 'HP:0000814', 'HP:0000816',
+                   'HP:0000820', 'HP:0000823', 'HP:0000826', 'HP:0000829', 'HP:0000832'],
+            'keywords': ['thyroid', 'diabetes', 'insulin', 'hormone', 'pituitary', 'adrenal',
+                        'growth', 'puberty', 'gonad', 'menstrual', 'obesity', 'metabolic',
+                        'glucose', 'cortisol', 'ACTH', 'TSH', 'testosterone', 'estrogen']
+        },
+        'Dermatological': {
+            'ids': ['HP:0000952', 'HP:0000953', 'HP:0000955', 'HP:0000958', 'HP:0000960',
+                   'HP:0000962', 'HP:0000964', 'HP:0000968', 'HP:0000970', 'HP:0000972',
+                   'HP:0000974', 'HP:0000976', 'HP:0000978', 'HP:0000980', 'HP:0000982',
+                   'HP:0000984', 'HP:0000986', 'HP:0000988', 'HP:0000990', 'HP:0000992'],
+            'keywords': ['skin', 'rash', 'pigment', 'hair', 'nail', 'ichthyosis', 'erythema',
+                        'vesicle', 'ulcer', 'scar', 'hyperkeratosis', 'alopecia', 'dermis',
+                        'epidermis', 'melanoma', 'pruritus', 'urticaria']
+        },
+        'Immunological': {
+            'ids': ['HP:0002721', 'HP:0002725', 'HP:0002728', 'HP:0002730', 'HP:0002733',
+                   'HP:0002736', 'HP:0002739', 'HP:0002742', 'HP:0002745', 'HP:0002748',
+                   'HP:0002751', 'HP:0002754', 'HP:0002757', 'HP:0002760', 'HP:0002763',
+                   'HP:0002766', 'HP:0002769', 'HP:0002772', 'HP:0002775', 'HP:0002778'],
+            'keywords': ['immune', 'infection', 'autoimmune', 'allergy', 'antibody', 'lymphocyte',
+                        'immuno', 'inflammation', 'sepsis', 'immunodeficiency', 'IgA', 'IgG',
+                        'IgM', 'T cell', 'B cell', 'macrophage', 'neutrophil', 'eosinophil']
+        },
+        'Ear': {
+            'ids': ['HP:0000365', 'HP:0000368', 'HP:0000370', 'HP:0000373', 'HP:0000376',
+                   'HP:0000379', 'HP:0000382', 'HP:0000385', 'HP:0000388', 'HP:0000391',
+                   'HP:0000394', 'HP:0000397', 'HP:0000400', 'HP:0000403', 'HP:0000406',
+                   'HP:0000409', 'HP:0000412', 'HP:0000415', 'HP:0000418', 'HP:0000421'],
+            'keywords': ['hearing', 'deafness', 'auditory', 'ear', 'vestibular', 'cochlea',
+                        'otosclerosis', 'tinnitus', 'vertigo', 'otitis', 'tympanic']
+        },
+        'Hematological': {
+            'ids': ['HP:0001871', 'HP:0001873', 'HP:0001875', 'HP:0001877', 'HP:0001879',
+                   'HP:0001881', 'HP:0001883', 'HP:0001885', 'HP:0001887', 'HP:0001889',
+                   'HP:0001891', 'HP:0001893', 'HP:0001895', 'HP:0001897', 'HP:0001899',
+                   'HP:0001901', 'HP:0001903', 'HP:0001905', 'HP:0001907', 'HP:0001909'],
+            'keywords': ['anemia', 'thrombocytopenia', 'leukemia', 'lymphoma', 'coagulation',
+                        'bleeding', 'clotting', 'platelet', 'erythrocyte', 'hemoglobin',
+                        'neutropenia', 'pancytopenia', 'splenomegaly']
+        },
+        'Reproductive': {
+            'ids': ['HP:0000078', 'HP:0000080', 'HP:0000082', 'HP:0000084', 'HP:0000086',
+                   'HP:0000088', 'HP:0000090', 'HP:0000092', 'HP:0000094', 'HP:0000096',
+                   'HP:0000108', 'HP:0000112', 'HP:0000116', 'HP:0000120', 'HP:0000124',
+                   'HP:0000128', 'HP:0000132', 'HP:0000136', 'HP:0000140', 'HP:0000144'],
+            'keywords': ['gonadal', 'ovarian', 'testicular', 'uterus', 'prostate', 'ovary',
+                        'testis', 'ovulation', 'spermatogenesis', 'infertility', 'menstrual',
+                        'hirsutism', 'clitoromegaly', 'micropenis']
+        },
+        'Metabolic': {
+            'ids': ['HP:0001939', 'HP:0001941', 'HP:0001943', 'HP:0001945', 'HP:0001947',
+                   'HP:0001949', 'HP:0001951', 'HP:0001953', 'HP:0001955', 'HP:0001957',
+                   'HP:0001959', 'HP:0001961', 'HP:0001963', 'HP:0001965', 'HP:0001967',
+                   'HP:0001969', 'HP:0001971', 'HP:0001973', 'HP:0001975', 'HP:0001977'],
+            'keywords': ['metabolic', 'acidosis', 'alkalosis', 'hypoglycemia', 'hyperglycemia',
+                        'hyperammonemia', 'lactic acid', 'pyruvate', 'ketosis', 'hypokalemia',
+                        'hyperkalemia', 'hyponatremia', 'hypernatremia', 'hypocalcemia',
+                        'hypercalcemia', 'hypomagnesemia', 'hypermagnesemia']
+        }
+    }
+    
+    def __init__(self, hpo_files: Dict[str, Path]):
+        self.hpo_files = hpo_files
+        self.gene_to_hpo = defaultdict(list)
+        self.hpo_descriptions = self.parse_hpo_ontology()
+        
+    def parse_phenotype_to_genes(self) -> Dict[str, List[HPOData]]:
+        filepath = self.hpo_files['phenotype_to_genes']
+        print(f"📖 Чтение {filepath.name}...")
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, desc="Парсинг phenotype_to_genes"):
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) < 4:
+                    continue
+                if parts[0].startswith('HP:'):
+                    hpo_id, hpo_name, gene_symbol, frequency = parts[0], parts[1], parts[2], parts[3] if len(parts)>3 else ""
+                else:
+                    if len(parts) >= 5 and parts[3].startswith('HP:'):
+                        gene_symbol, hpo_name, hpo_id, frequency = parts[1], parts[2], parts[3], parts[4] if len(parts)>4 else ""
+                    else:
+                        continue
+                existing = {h.hpo_id for h in self.gene_to_hpo.get(gene_symbol, [])}
+                if hpo_id not in existing:
+                    hpo_data = HPOData(
+                        hpo_id=hpo_id,
+                        hpo_name=hpo_name,
+                        gene_symbol=gene_symbol,
+                        frequency=frequency
+                    )
+                    self.gene_to_hpo[gene_symbol].append(hpo_data)
+        print(f"✅ Загружено {sum(len(v) for v in self.gene_to_hpo.values())} HPO ассоциаций для {len(self.gene_to_hpo)} генов")
+        return self.gene_to_hpo
+    
+    def parse_genes_to_phenotype(self) -> Dict[str, List[HPOData]]:
+        filepath = self.hpo_files.get('genes_to_phenotype')
+        if not filepath or not filepath.exists():
+            return self.gene_to_hpo
+        print(f"📖 Чтение {filepath.name}...")
+        with open(filepath, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, desc="Парсинг genes_to_phenotype"):
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) >= 4:
+                    gene_symbol, hpo_id, hpo_name = parts[1], parts[2], parts[3]
+                    existing = {h.hpo_id for h in self.gene_to_hpo.get(gene_symbol, [])}
+                    if hpo_id not in existing:
+                        hpo_data = HPOData(
+                            hpo_id=hpo_id,
+                            hpo_name=hpo_name,
+                            gene_symbol=gene_symbol
+                        )
+                        self.gene_to_hpo[gene_symbol].append(hpo_data)
+        return self.gene_to_hpo
+    
+    def parse_hpo_ontology(self) -> Dict[str, str]:
+        filepath = self.hpo_files.get('hpo_ontology')
+        if not filepath or not filepath.exists():
+            return {}
+        print(f"📖 Чтение онтологии {filepath.name}...")
+        hpo_desc = {}
+        with open(filepath, 'r', encoding='utf-8') as f:
+            current_id = ""
+            current_name = ""
+            for line in f:
+                line = line.strip()
+                if line.startswith('id:'):
+                    current_id = line[3:].strip()
+                elif line.startswith('name:'):
+                    current_name = line[5:].strip()
+                    if current_id and current_name:
+                        hpo_desc[current_id] = current_name
+                        current_id = ""
+                        current_name = ""
+        print(f"✅ Загружено {len(hpo_desc)} описаний HPO")
+        return hpo_desc
+    
+    def get_gene_hpo_data(self, gene_symbol: str) -> List[HPOData]:
+        gene_upper = gene_symbol.upper()
+        if gene_upper in self.gene_to_hpo:
+            return self.gene_to_hpo[gene_upper]
+        for key in self.gene_to_hpo:
+            if key.upper() == gene_upper:
+                return self.gene_to_hpo[key]
+        for key in self.gene_to_hpo:
+            if gene_upper in key.upper() or key.upper() in gene_upper:
+                return self.gene_to_hpo[key]
+        return []
+    
+    def analyze_phenotype_categories(self, hpo_list: List[HPOData]) -> Dict[str, int]:
+        categories = {cat: 0 for cat in self.PHENOTYPE_CATEGORIES}
+        for hpo in hpo_list:
+            hpo_id = hpo.hpo_id
+            matched = False
+            for cat, info in self.PHENOTYPE_CATEGORIES.items():
+                if hpo_id in info.get('ids', []):
+                    categories[cat] += 1
+                    matched = True
+                    break
+            if not matched:
+                hpo_name_lower = hpo.hpo_name.lower()
+                for cat, info in self.PHENOTYPE_CATEGORIES.items():
+                    for kw in info.get('keywords', []):
+                        if kw in hpo_name_lower:
+                            categories[cat] += 1
+                            matched = True
+                            break
+                    if matched:
+                        break
+        return categories
+    
+    def calculate_phenotype_score(self, hpo_list: List[HPOData]) -> float:
+        if not hpo_list:
+            return 0.0
+        total = sum(h.frequency_score for h in hpo_list)
+        max_possible = len(hpo_list) * 3.0
+        return round((total / max_possible) * 10, 2) if max_possible > 0 else 0.0
+
+# ==================== ПАРСЕР CLINVAR ====================
+class ClinVarParser:
+    def __init__(self, clinvar_file: Path):
+        self.clinvar_file = clinvar_file
+        self.gene_to_variants = defaultdict(list)
+        self.synonyms = {
+            'BBS3': 'ARL6', 'ARL6': 'BBS3',
+            'BBS6': 'MKKS', 'MKKS': 'BBS6',
+            'NPHP2': 'INVS', 'INVS': 'NPHP2',
+            'IFT144': 'WDR19', 'WDR19': 'IFT144',
+            'IFT121': 'WDR35', 'WDR35': 'IFT121',
+            'CCDC11': 'CFAP53', 'CFAP53': 'CCDC11',
+            'CTPP4': 'TTC12', 'TTC12': 'CTPP4',
+            'BBS17': 'LZTFL1', 'LZTFL1': 'BBS17',
+            'IFT54': 'TRAF3IP1', 'TRAF3IP1': 'IFT54'
+        }
+    
+    def parse_clinvar_data(self, target_genes: List[str]) -> Dict[str, List[ClinVarVariant]]:
+        print(f"📖 Парсинг ClinVar из {self.clinvar_file.name}...")
+        target_set = {g.upper() for g in target_genes}
+        for gene in list(target_set):
+            if gene in self.synonyms:
+                target_set.add(self.synonyms[gene].upper())
+        
+        try:
+            chunksize = 100000
+            total_rows = 0
+            found = 0
+            for chunk in tqdm(pd.read_csv(self.clinvar_file, sep='\t', dtype=str,
+                                          chunksize=chunksize, low_memory=False),
+                              desc="Чтение ClinVar"):
+                total_rows += len(chunk)
+                needed = ['GeneSymbol', 'ClinicalSignificance', 'Type', 'ReviewStatus',
+                          'Chromosome', 'Start', 'AgeOfOnset', 'PhenotypeIDs']
+                col_map = {}
+                for col in needed:
+                    for actual in chunk.columns:
+                        if col.lower() in actual.lower():
+                            col_map[col] = actual
+                            break
+                if 'GeneSymbol' not in col_map:
+                    continue
+                chunk['GeneSymbol_upper'] = chunk[col_map['GeneSymbol']].str.upper()
+                filtered = chunk[chunk['GeneSymbol_upper'].isin(target_set)]
+                for _, row in filtered.iterrows():
+                    gene = str(row[col_map['GeneSymbol']]).strip().upper()
+                    if gene in self.synonyms:
+                        gene = self.synonyms[gene]
+                    variant_id = str(row.get(col_map.get('VariationID', 'VariationID'), '')).strip()
+                    clin_sig = str(row.get(col_map.get('ClinicalSignificance', 'ClinicalSignificance'), '')).strip()
+                    type_raw = str(row.get(col_map.get('Type', 'Type'), '')).strip().lower()
+                    variant_type = self._classify_variant_type(type_raw)
+                    review = str(row.get(col_map.get('ReviewStatus', 'ReviewStatus'), '')).strip()
+                    chrom = str(row.get(col_map.get('Chromosome', 'Chromosome'), '')).strip()
+                    pos = str(row.get(col_map.get('Start', 'Start'), '')).strip()
+                    age = str(row.get(col_map.get('AgeOfOnset', 'AgeOfOnset'), '')).strip()
+                    phen_ids = str(row.get(col_map.get('PhenotypeIDs', 'PhenotypeIDs'), '')).strip()
+                    
+                    var = ClinVarVariant(
+                        variant_id=variant_id,
+                        gene_symbol=gene,
+                        clinical_significance=clin_sig,
+                        variant_type=variant_type,
+                        review_status=review,
+                        chromosome=chrom,
+                        position=pos,
+                        age_of_onset=age,
+                        phenotype_ids=phen_ids
+                    )
+                    self.gene_to_variants[gene].append(var)
+                    found += 1
+            print(f"✅ Обработано {total_rows} строк, найдено {found} вариантов для {len(self.gene_to_variants)} генов")
+            if found == 0:
+                print("⚠️ Не найдено вариантов, пробуем альтернативный парсинг...")
+                self._alternative_parsing(target_set)
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            import traceback
+            traceback.print_exc()
+            print("🔄 Пробуем простой парсинг...")
+            self._simple_parse(target_set)
+        return self.gene_to_variants
+    
+    def _classify_variant_type(self, type_str: str) -> str:
+        if not type_str:
+            return 'other'
+        type_low = type_str.lower()
+        if 'missense' in type_low:
+            return 'missense'
+        if 'nonsense' in type_low or 'stop_gain' in type_low or 'stop gain' in type_low:
+            return 'nonsense'
+        if 'frameshift' in type_low:
+            return 'frameshift'
+        if 'splice' in type_low:
+            return 'splice'
+        if 'deletion' in type_low:
+            return 'deletion'
+        if 'insertion' in type_low:
+            return 'insertion'
+        if 'duplication' in type_low:
+            return 'duplication'
+        if 'indel' in type_low:
+            return 'indel'
+        if 'synonymous' in type_low or 'silent' in type_low:
+            return 'synonymous'
+        if 'stop_loss' in type_low:
+            return 'stop_loss'
+        if 'start_loss' in type_low:
+            return 'start_loss'
+        if 'intronic' in type_low or 'intron' in type_low:
+            return 'intronic'
+        if 'utr' in type_low or 'untranslated' in type_low:
+            return 'utr'
+        if 'regulatory' in type_low:
+            return 'regulatory'
+        if 'intergenic' in type_low:
+            return 'intergenic'
+        return 'other'
+    
+    def _alternative_parsing(self, target_set: Set[str]):
+        try:
+            with open(self.clinvar_file, 'r', encoding='utf-8') as f:
+                header = f.readline().strip().split('\t')
+                idx = {col: i for i, col in enumerate(header)}
+                gene_col = idx.get('GeneSymbol', -1)
+                if gene_col == -1:
+                    for i, col in enumerate(header):
+                        if 'gene' in col.lower() and 'symbol' in col.lower():
+                            gene_col = i
+                            break
+                if gene_col == -1:
+                    print("❌ Колонка GeneSymbol не найдена")
+                    return
+                clin_col = idx.get('ClinicalSignificance', -1)
+                type_col = idx.get('Type', -1)
+                age_col = idx.get('AgeOfOnset', -1)
+                for line in tqdm(f, desc="Альтернативный парсинг"):
+                    parts = line.strip().split('\t')
+                    if len(parts) <= max(gene_col, clin_col, type_col, age_col):
+                        continue
+                    gene = parts[gene_col].strip().upper()
+                    if gene in target_set:
+                        var = ClinVarVariant(
+                            variant_id=parts[1] if len(parts)>1 else "",
+                            gene_symbol=gene,
+                            clinical_significance=parts[clin_col] if clin_col!=-1 else "",
+                            variant_type=self._classify_variant_type(parts[type_col] if type_col!=-1 else ""),
+                            review_status=parts[idx.get('ReviewStatus', -1)] if 'ReviewStatus' in idx else "",
+                            chromosome=parts[idx.get('Chromosome', -1)] if 'Chromosome' in idx else "",
+                            position=parts[idx.get('Start', -1)] if 'Start' in idx else "",
+                            age_of_onset=parts[age_col] if age_col!=-1 else "",
+                            phenotype_ids=parts[idx.get('PhenotypeIDs', -1)] if 'PhenotypeIDs' in idx else ""
+                        )
+                        self.gene_to_variants[gene].append(var)
+            print(f"✅ Альтернативным методом найдено {sum(len(v) for v in self.gene_to_variants.values())} вариантов")
+        except Exception as e:
+            print(f"❌ Альтернативный парсинг не удался: {e}")
+    
+    def _simple_parse(self, target_set: Set[str]):
+        print("🔄 Простой парсинг...")
+        try:
+            with open(self.clinvar_file, 'r', encoding='utf-8') as f:
+                for line in tqdm(f, desc="Простой парсинг"):
+                    if '\t' not in line:
+                        continue
+                    parts = line.strip().split('\t')
+                    if len(parts) < 5:
+                        continue
+                    for i, part in enumerate(parts[:10]):
+                        gene_candidate = str(part).strip().upper()
+                        if gene_candidate in target_set:
+                            var = ClinVarVariant(
+                                variant_id=parts[1] if len(parts)>1 else "",
+                                gene_symbol=gene_candidate,
+                                clinical_significance=parts[5] if len(parts)>5 else "",
+                                variant_type=self._classify_variant_type(parts[6] if len(parts)>6 else ""),
+                                review_status=parts[7] if len(parts)>7 else "",
+                                chromosome=parts[12] if len(parts)>12 else "",
+                                position=parts[13] if len(parts)>13 else "",
+                                age_of_onset=parts[14] if len(parts)>14 else "",
+                                phenotype_ids=parts[15] if len(parts)>15 else ""
+                            )
+                            self.gene_to_variants[gene_candidate].append(var)
+                            break
+            print(f"✅ Простым парсингом найдено {sum(len(v) for v in self.gene_to_variants.values())} вариантов")
+        except Exception as e:
+            print(f"❌ Простой парсинг не удался: {e}")
+    
+    def get_gene_variants(self, gene_symbol: str) -> List[ClinVarVariant]:
+        gene_upper = gene_symbol.upper()
+        if gene_upper in self.gene_to_variants:
+            return self.gene_to_variants[gene_upper]
+        if gene_upper in self.synonyms:
+            alt = self.synonyms[gene_upper].upper()
+            if alt in self.gene_to_variants:
+                return self.gene_to_variants[alt]
+        return []
+    
+    def analyze_variants(self, variants: List[ClinVarVariant]) -> Dict[str, Any]:
+        if not variants:
+            return {
+                'total': 0,
+                'pathogenic': 0,
+                'likely_pathogenic': 0,
+                'vus': 0,
+                'likely_benign': 0,
+                'benign': 0,
+                'conflicting': 0,
+                'types': {},
+                'pathogenicity_score': 0.0,
+                'age_distribution': {}
+            }
+        pathogenic = sum(1 for v in variants if v.is_pathogenic)
+        likely_pathogenic = sum(1 for v in variants if v.is_likely_pathogenic)
+        vus = sum(1 for v in variants if v.is_vus)
+        likely_benign = sum(1 for v in variants if v.is_likely_benign)
+        benign = sum(1 for v in variants if v.is_benign)
+        conflicting = sum(1 for v in variants if 'conflict' in v.clinical_significance.lower())
+        type_counts = Counter(v.variant_type for v in variants)
+        age_counts = Counter()
+        for v in variants:
+            if v.age_of_onset and v.age_of_onset.lower() not in ['', 'not provided', 'na']:
+                age_counts[v.age_of_onset] += 1
+        pathogenicity_score = ((pathogenic + likely_pathogenic) / len(variants)) * 10 if variants else 0.0
+        return {
+            'total': len(variants),
+            'pathogenic': pathogenic,
+            'likely_pathogenic': likely_pathogenic,
+            'vus': vus,
+            'likely_benign': likely_benign,
+            'benign': benign,
+            'conflicting': conflicting,
+            'types': dict(type_counts),
+            'pathogenicity_score': round(pathogenicity_score, 2),
+            'age_distribution': dict(age_counts)
+        }
+
+# ==================== ИНТЕГРАТОР ====================
+class CiliopathyDataIntegrator:
+    def __init__(self, genes: List[str]):
+        self.genes = list(set(genes))
+        self.gene_summaries = {}
+        self.synonym_map = {
+            'ARL6': 'BBS3', 'BBS3': 'ARL6',
+            'MKKS': 'BBS6', 'BBS6': 'MKKS',
+            'INVS': 'NPHP2', 'NPHP2': 'INVS',
+            'WDR19': 'IFT144', 'IFT144': 'WDR19',
+            'WDR35': 'IFT121', 'IFT121': 'WDR35',
+            'CFAP53': 'CCDC11', 'CCDC11': 'CFAP53',
+            'TTC12': 'CTPP4', 'CTPP4': 'TTC12',
+            'LZTFL1': 'BBS17', 'BBS17': 'LZTFL1',
+            'TRAF3IP1': 'IFT54', 'IFT54': 'TRAF3IP1'
+        }
+    
+    def integrate_data(self, hpo_parser: HPOParser, clinvar_parser: ClinVarParser):
+        print("\n" + "="*60)
+        print("🔄 ИНТЕГРАЦИЯ ДАННЫХ")
+        print("="*60)
+        for gene in tqdm(self.genes, desc="Обработка генов"):
+            hpo_data = hpo_parser.get_gene_hpo_data(gene)
+            if not hpo_data and gene in self.synonym_map:
+                hpo_data = hpo_parser.get_gene_hpo_data(self.synonym_map[gene])
+            phenotype_categories = hpo_parser.analyze_phenotype_categories(hpo_data)
+            phenotype_score = hpo_parser.calculate_phenotype_score(hpo_data)
+            
+            variants = clinvar_parser.get_gene_variants(gene)
+            variant_analysis = clinvar_parser.analyze_variants(variants)
+            
+            summary = GeneSummary(
+                gene_symbol=gene,
+                hpo_terms=hpo_data,
+                hpo_count=len(hpo_data),
+                phenotype_categories=phenotype_categories,
+                phenotype_score=phenotype_score,
+                clinvar_variants=variants,
+                total_variants=variant_analysis['total'],
+                pathogenic_count=variant_analysis['pathogenic'],
+                likely_pathogenic_count=variant_analysis['likely_pathogenic'],
+                vus_count=variant_analysis['vus'],
+                likely_benign_count=variant_analysis['likely_benign'],
+                benign_count=variant_analysis['benign'],
+                conflicting_count=variant_analysis['conflicting'],
+                variant_types=variant_analysis['types'],
+                pathogenicity_score=variant_analysis['pathogenicity_score'],
+                age_of_onset_distribution=variant_analysis.get('age_distribution', {})
+            )
+            summary.data_quality = self.calculate_data_quality(summary)
+            summary.disease_association_score = self.calculate_disease_score(summary)
+            self.gene_summaries[gene] = summary
+        print(f"✅ Интегрировано для {len(self.gene_summaries)} генов")
+        return self.gene_summaries
+    
+    def calculate_data_quality(self, summary: GeneSummary) -> float:
+        metrics = [
+            1 if summary.hpo_count > 0 else 0,
+            1 if summary.total_variants > 0 else 0,
+            1 if (summary.pathogenic_count + summary.likely_pathogenic_count) > 0 else 0,
+            1 if summary.hpo_count > 5 and summary.total_variants > 5 else 0
+        ]
+        return sum(metrics) / len(metrics) * 100
+    
+    def calculate_disease_score(self, summary: GeneSummary) -> float:
+        pheno_comp = summary.phenotype_score / 10.0
+        patho_comp = summary.pathogenicity_score / 10.0 if summary.total_variants > 0 else 0.0
+        evid_comp = min(1.0, (summary.hpo_count + summary.total_variants) / 100)
+        score = (0.4 * pheno_comp + 0.4 * patho_comp + 0.2 * evid_comp) * 10
+        return round(score, 2)
+    
+    def export_to_dataframe(self) -> pd.DataFrame:
+        rows = []
+        for gene, summary in self.gene_summaries.items():
+            row = {
+                'gene_symbol': gene,
+                'hpo_term_count': summary.hpo_count,
+                'phenotype_score': summary.phenotype_score,
+                'total_variants': summary.total_variants,
+                'pathogenic': summary.pathogenic_count,
+                'likely_pathogenic': summary.likely_pathogenic_count,
+                'vus': summary.vus_count,
+                'likely_benign': summary.likely_benign_count,
+                'benign': summary.benign_count,
+                'conflicting': summary.conflicting_count,
+                'pathogenicity_score': summary.pathogenicity_score,
+                'data_quality': summary.data_quality,
+                'disease_association_score': summary.disease_association_score,
+                'age_of_onset_counts': str(summary.age_of_onset_distribution) if summary.age_of_onset_distribution else ''
+            }
+            for cat, cnt in summary.phenotype_categories.items():
+                if cnt > 0:
+                    row[f'pheno_{cat.lower()}'] = cnt
+            for vtype, cnt in summary.variant_types.items():
+                if cnt > 0:
+                    row[f'var_{vtype}'] = cnt
+            rows.append(row)
+        df = pd.DataFrame(rows).fillna(0)
+        for col in df.columns:
+            if col not in ['gene_symbol', 'age_of_onset_counts']:
+                try:
+                    df[col] = pd.to_numeric(df[col])
+                except:
+                    pass
+        return df.sort_values('disease_association_score', ascending=False)
+    
+    def export_to_json(self, filename: str = "ciliopathy_genes_data.json"):
+        print(f"\n💾 Экспорт в JSON ({filename})...")
+        data_dict = {}
+        for gene, summary in self.gene_summaries.items():
+            data_dict[gene] = summary.to_dict()
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data_dict, f, indent=2, ensure_ascii=False, default=str)
+        print(f"✅ Данные экспортированы в {filename}")
+    
+    def generate_statistics_report(self) -> Dict[str, Any]:
+        total_genes = len(self.gene_summaries)
+        stats = {
+            'total_genes': total_genes,
+            'genes_with_hpo': sum(1 for s in self.gene_summaries.values() if s.hpo_count > 0),
+            'genes_with_clinvar': sum(1 for s in self.gene_summaries.values() if s.total_variants > 0),
+            'genes_with_both': sum(1 for s in self.gene_summaries.values() if s.hpo_count > 0 and s.total_variants > 0),
+            'total_hpo_terms': sum(s.hpo_count for s in self.gene_summaries.values()),
+            'total_variants': sum(s.total_variants for s in self.gene_summaries.values()),
+            'total_pathogenic': sum(s.pathogenic_count + s.likely_pathogenic_count for s in self.gene_summaries.values()),
+            'total_vus': sum(s.vus_count for s in self.gene_summaries.values()),
+            'avg_phenotype_score': np.mean([s.phenotype_score for s in self.gene_summaries.values()]),
+            'avg_pathogenicity_score': np.mean([s.pathogenicity_score for s in self.gene_summaries.values()]),
+            'avg_data_quality': np.mean([s.data_quality for s in self.gene_summaries.values()]),
+            'top_phenotype_categories': {},
+            'top_variant_types': {},
+            'top_genes_by_disease_score': []
+        }
+        cat_count = Counter()
+        for s in self.gene_summaries.values():
+            for cat, cnt in s.phenotype_categories.items():
+                if cnt > 0:
+                    cat_count[cat] += 1
+        stats['top_phenotype_categories'] = dict(cat_count.most_common(10))
+        
+        var_count = Counter()
+        for s in self.gene_summaries.values():
+            for vtype, cnt in s.variant_types.items():
+                var_count[vtype] += cnt
+        stats['top_variant_types'] = dict(var_count.most_common(10))
+        
+        sorted_genes = sorted(self.gene_summaries.items(), key=lambda x: x[1].disease_association_score, reverse=True)[:10]
+        stats['top_genes_by_disease_score'] = [{'gene': g, 'score': s.disease_association_score} for g, s in sorted_genes]
+        
+        print("\n📊 СТАТИСТИКА")
+        print(f"Всего генов: {stats['total_genes']}")
+        print(f"Гены с HPO: {stats['genes_with_hpo']} ({stats['genes_with_hpo']/total_genes*100:.1f}%)")
+        print(f"Гены с ClinVar: {stats['genes_with_clinvar']} ({stats['genes_with_clinvar']/total_genes*100:.1f}%)")
+        print(f"Гены с обоими: {stats['genes_with_both']} ({stats['genes_with_both']/total_genes*100:.1f}%)")
+        print(f"Всего HPO терминов: {stats['total_hpo_terms']:,}")
+        print(f"Всего вариантов: {stats['total_variants']:,}")
+        if stats['total_variants'] > 0:
+            print(f"Патогенных (включая LP): {stats['total_pathogenic']:,} ({stats['total_pathogenic']/stats['total_variants']*100:.1f}%)")
+            print(f"VUS: {stats['total_vus']:,} ({stats['total_vus']/stats['total_variants']*100:.1f}%)")
+        print(f"Средний фенотипический score: {stats['avg_phenotype_score']:.2f}/10")
+        print(f"Средний патогенетический score: {stats['avg_pathogenicity_score']:.2f}/10")
+        print(f"Среднее качество данных: {stats['avg_data_quality']:.1f}%")
+        print("\n🏆 ТОП-10 ГЕНОВ ПО АССОЦИАЦИИ:")
+        for item in stats['top_genes_by_disease_score']:
+            print(f"  {item['gene']}: {item['score']:.1f}/10")
+        return stats
+
+# ==================== ВИЗУАЛИЗАЦИЯ И ОТЧЁТЫ ====================
+class DataVisualizer:
+    @staticmethod
+    def plot_summary_charts(df: pd.DataFrame, stats: Dict[str, Any]):
+        print("\n🎨 Создание графиков...")
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle('Анализ генов цилиопатий (HPO + ClinVar)', fontsize=16, fontweight='bold')
+        
+        ax1 = axes[0,0]
+        ax1.hist(df['hpo_term_count'], bins=30, alpha=0.7, color='#1f77b4', edgecolor='black')
+        ax1.set_title('Распределение HPO терминов')
+        ax1.set_xlabel('Количество')
+        ax1.axvline(df['hpo_term_count'].mean(), color='red', linestyle='--', label=f'Среднее: {df["hpo_term_count"].mean():.1f}')
+        ax1.legend()
+        
+        ax2 = axes[0,1]
+        ax2.hist(df['phenotype_score'], bins=20, alpha=0.7, color='#ff7f0e', edgecolor='black')
+        ax2.set_title('Фенотипический score')
+        ax2.set_xlabel('Score (0-10)')
+        ax2.axvline(df['phenotype_score'].mean(), color='red', linestyle='--', label=f'Среднее: {df["phenotype_score"].mean():.1f}')
+        ax2.legend()
+        
+        ax3 = axes[0,2]
+        ax3.hist(df['data_quality'], bins=20, alpha=0.7, color='#2ca02c', edgecolor='black')
+        ax3.set_title('Качество данных (%)')
+        ax3.axvline(df['data_quality'].mean(), color='red', linestyle='--', label=f'Среднее: {df["data_quality"].mean():.1f}%')
+        ax3.legend()
+        
+        ax4 = axes[1,0]
+        ax4.hist(df['disease_association_score'], bins=20, alpha=0.7, color='#9467bd', edgecolor='black')
+        ax4.set_title('Оценка ассоциации с заболеванием')
+        ax4.set_xlabel('Score (0-10)')
+        ax4.axvline(df['disease_association_score'].mean(), color='red', linestyle='--', label=f'Среднее: {df["disease_association_score"].mean():.1f}')
+        ax4.legend()
+        
+        ax5 = axes[1,1]
+        pheno_cols = [c for c in df.columns if c.startswith('pheno_')]
+        if pheno_cols:
+            sums = df[pheno_cols].sum().sort_values(ascending=False).head(10)
+            names = [c.replace('pheno_', '').title() for c in sums.index]
+            ax5.barh(names, sums.values, color='#d62728')
+            ax5.set_title('Топ категорий фенотипов')
+            ax5.set_xlabel('Количество генов')
+        else:
+            ax5.text(0.5,0.5,'Нет данных', ha='center', va='center')
+        
+        ax6 = axes[1,2]
+        top = df.nlargest(15, 'disease_association_score')
+        ax6.barh(top['gene_symbol'], top['disease_association_score'], color='#2ca02c')
+        ax6.set_title('Топ 15 генов по ассоциации')
+        ax6.set_xlabel('Score')
+        
+        plt.tight_layout()
+        plt.savefig('ciliopathy_analysis_summary.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        print("✅ Графики сохранены в ciliopathy_analysis_summary.png")
+    
+    @staticmethod
+    def create_interactive_report(df: pd.DataFrame):
+        print("\n💻 Создание HTML-отчёта...")
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="utf-8"><title>Анализ цилиопатий</title>
+        <style>
+            body {font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5;}
+            .header {background: #2c3e50; color: white; padding: 20px; border-radius: 10px;}
+            .section {background: white; padding: 20px; margin: 20px 0; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);}
+            table {width:100%; border-collapse: collapse;}
+            th, td {padding: 12px; text-align: left; border-bottom: 1px solid #ddd;}
+            th {background: #3498db; color: white; cursor: pointer;}
+            tr:hover {background: #f5f5f5;}
+            .metric-box {display: inline-block; padding: 15px; margin: 10px; background: #e8f4f8; border-radius: 5px; min-width:150px;}
+            .metric-value {font-size: 24px; font-weight: bold; color: #2c3e50;}
+            .metric-label {font-size: 14px; color: #7f8c8d;}
+            .search-box {width:100%; padding:10px; margin:10px 0; box-sizing:border-box;}
+        </style>
+        <script>
+            function filterTable() {
+                var input = document.getElementById('search');
+                var filter = input.value.toUpperCase();
+                var table = document.getElementById('geneTable');
+                var tr = table.getElementsByTagName('tr');
+                for (var i = 1; i < tr.length; i++) {
+                    var td = tr[i].getElementsByTagName('td')[0];
+                    if (td) {
+                        if (td.textContent.toUpperCase().indexOf(filter) > -1) tr[i].style.display = '';
+                        else tr[i].style.display = 'none';
+                    }
+                }
+            }
+            function sortTable(n) {
+                var table = document.getElementById('geneTable');
+                var rows = table.rows;
+                var switching = true;
+                var dir = 'asc';
+                while (switching) {
+                    switching = false;
+                    for (var i = 1; i < rows.length-1; i++) {
+                        var x = rows[i].getElementsByTagName('td')[n];
+                        var y = rows[i+1].getElementsByTagName('td')[n];
+                        var xVal = parseFloat(x.innerHTML) || x.innerHTML;
+                        var yVal = parseFloat(y.innerHTML) || y.innerHTML;
+                        if ((dir === 'asc' && xVal > yVal) || (dir === 'desc' && xVal < yVal)) {
+                            rows[i].parentNode.insertBefore(rows[i+1], rows[i]);
+                            switching = true;
+                            break;
+                        }
+                    }
+                    if (!switching && dir === 'asc') { dir = 'desc'; switching = true; }
+                }
+            }
+        </script>
+        </head>
+        <body>
+        <div class="header"><h1>📊 Анализ генов цилиопатий</h1><p>Дата: {date}</p></div>
+        <div class="section"><h2>📈 Ключевые метрики</h2>{metrics}</div>
+        <div class="section"><h2>🔍 Поиск</h2><input id="search" class="search-box" onkeyup="filterTable()" placeholder="Введите ген..."></div>
+        <div class="section"><h2>🧬 Данные по генам</h2><table id="geneTable"><thead><tr>
+            <th onclick="sortTable(0)">Ген</th>
+            <th onclick="sortTable(1)">HPO</th>
+            <th onclick="sortTable(2)">PhenoScore</th>
+            <th onclick="sortTable(3)">Вариантов</th>
+            <th onclick="sortTable(4)">Патогенных+LP</th>
+            <th onclick="sortTable(5)">VUS</th>
+            <th onclick="sortTable(6)">Оценка ассоциации</th>
+            <th onclick="sortTable(7)">Качество</th>
+        </tr></thead><tbody>
+        {rows}
+        </tbody></table></div>
+        </body></html>
+        """
+        metrics_html = ""
+        metrics = {
+            'Среднее качество': f"{df['data_quality'].mean():.1f}%",
+            'Средняя оценка ассоциации': f"{df['disease_association_score'].mean():.2f}/10",
+            'Всего HPO': f"{df['hpo_term_count'].sum():,}",
+            'Всего вариантов': f"{df['total_variants'].sum():,}",
+            'Патогенных+LP': f"{(df['pathogenic'] + df['likely_pathogenic']).sum():,}",
+            'Гены с HPO': f"{(df['hpo_term_count']>0).sum()}",
+            'Гены с вариантами': f"{(df['total_variants']>0).sum()}"
+        }
+        for k,v in metrics.items():
+            metrics_html += f'<div class="metric-box"><div class="metric-value">{v}</div><div class="metric-label">{k}</div></div>'
+        
+        rows_html = ""
+        for _, row in df.iterrows():
+            rows_html += f"<tr><td>{row['gene_symbol']}</td><td>{int(row['hpo_term_count'])}</td><td>{row['phenotype_score']:.1f}</td><td>{int(row['total_variants'])}</td><td>{int(row['pathogenic'] + row['likely_pathogenic'])}</td><td>{int(row['vus'])}</td><td>{row['disease_association_score']:.1f}</td><td>{row['data_quality']:.1f}%</td></tr>"
+        
+        with open('ciliopathy_report.html', 'w', encoding='utf-8') as f:
+            f.write(html.format(date=datetime.now().strftime("%Y-%m-%d %H:%M"), metrics=metrics_html, rows=rows_html))
+        print("✅ Отчёт сохранён в ciliopathy_report.html")
+
+# ==================== ГЛАВНАЯ ФУНКЦИЯ ====================
+def main():
+    print("="*80)
+    print("🚀 ЗАПУСК РАСШИРЕННОГО АНАЛИЗА")
+    print("="*80)
+    try:
+        # Загрузка
+        downloader = DataDownloader()
+        hpo_files, clinvar_file = downloader.download_all()
+        
+        # HPO
+        print("\n📖 Парсинг HPO...")
+        hpo_parser = HPOParser(hpo_files)
+        hpo_parser.parse_phenotype_to_genes()
+        hpo_parser.parse_genes_to_phenotype()
+        
+        # ClinVar
+        print("\n📖 Парсинг ClinVar...")
+        clinvar_parser = ClinVarParser(clinvar_file)
+        clinvar_parser.parse_clinvar_data(GENES)
+        
+        # Интеграция
+        print("\n🔄 Интеграция...")
+        integrator = CiliopathyDataIntegrator(GENES)
+        integrator.integrate_data(hpo_parser, clinvar_parser)
+        
+        # Экспорт в DataFrame и файлы
+        df = integrator.export_to_dataframe()
+        df.to_csv('ciliopathy_genes_data.csv', index=False, encoding='utf-8-sig')
+        df.to_excel('ciliopathy_genes_data.xlsx', index=False, engine='openpyxl')
+        integrator.export_to_json('ciliopathy_genes_data.json')
+        
+        # Статистика
+        stats = integrator.generate_statistics_report()
+        
+        # Визуализация
+        visualizer = DataVisualizer()
+        visualizer.plot_summary_charts(df, stats)
+        visualizer.create_interactive_report(df)
+        
+        # ZIP-архив
+        files_to_zip = ['ciliopathy_genes_data.xlsx', 'ciliopathy_genes_data.csv',
+                        'ciliopathy_genes_data.json', 'ciliopathy_analysis_summary.png',
+                        'ciliopathy_report.html']
+        existing = [f for f in files_to_zip if Path(f).exists()]
+        if existing:
+            zip_name = 'ciliopathy_analysis_results.zip'
+            with zipfile.ZipFile(zip_name, 'w') as zf:
+                for f in existing:
+                    zf.write(f)
+            print(f"✅ ZIP-архив создан: {zip_name}")
+            try:
+                from google.colab import files
+                files.download(zip_name)
+            except ImportError:
+                from IPython.display import FileLink
+                display(FileLink(zip_name))
+        
+        print("\n🎉 ВСЕ ДАННЫЕ СОБРАНЫ!")
+        print("📁 Файлы: ciliopathy_genes_data.xlsx, .csv, .json, .png, .html, .zip")
+        return integrator, df
+    except Exception as e:
+        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
+
+if __name__ == "__main__":
+    main()
