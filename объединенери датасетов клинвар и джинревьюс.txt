@@ -1,0 +1,107 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from google.colab import files
+
+# Загружаем объединённый файл
+uploaded = files.upload()
+filename = list(uploaded.keys())[0]
+df = pd.read_excel(filename, sheet_name='Merged_Summary')
+
+# Переименуем колонки для удобства (если нужно)
+# Убедимся, что числовые колонки приведены к float
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
+
+# 1. Пересчитаем lof_ratio, если колонки существуют
+if all(col in df.columns for col in ['var_nonsense', 'var_frameshift', 'var_splice', 'total_variants_hpo_clinvar']):
+    df['lof_ratio'] = (df['var_nonsense'] + df['var_frameshift'] + df['var_splice']) / df['total_variants_hpo_clinvar'].replace(0, np.nan)
+else:
+    print("Колонки для LoF не найдены, пропускаем.")
+
+# 2. Базовая информация
+print(f"Число генов: {len(df)}")
+print("Первые 5 строк:")
+print(df.head())
+
+# 3. Распределения основных баллов (GeneReviews)
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+sns.histplot(df['phenotype_score_genereviews'].dropna(), bins=20, kde=True, ax=axes[0,0])
+axes[0,0].set_title('Phenotype Score (GeneReviews)')
+sns.histplot(df['pathogenicity_score_genereviews'].dropna(), bins=20, kde=True, ax=axes[0,1])
+axes[0,1].set_title('Pathogenicity Score (GeneReviews)')
+sns.histplot(df['disease_association_score_genereviews'].dropna(), bins=20, kde=True, ax=axes[1,0])
+axes[1,0].set_title('Disease Association Score (GeneReviews)')
+sns.histplot(df['early_ratio'].dropna(), bins=20, kde=True, ax=axes[1,1])
+axes[1,1].set_title('Early Ratio')
+plt.tight_layout()
+plt.show()
+
+# 4. Scatter plots для сравнения подходов
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+sns.scatterplot(data=df, x='pathogenicity_score_genereviews', y='pathogenicity_score_hpo_clinvar', ax=axes[0])
+axes[0].set_title('Pathogenicity: GeneReviews vs HPO-ClinVar')
+sns.scatterplot(data=df, x='disease_association_score_genereviews', y='disease_association_score_hpo_clinvar', ax=axes[1])
+axes[1].set_title('Disease Association: GeneReviews vs HPO-ClinVar')
+plt.tight_layout()
+plt.show()
+
+# 5. Тепловая карта корреляций (выберем только полезные числовые колонки)
+cols_to_corr = ['phenotype_score_genereviews', 'pathogenicity_score_genereviews',
+                'disease_association_score_genereviews', 'pathogenicity_score_hpo_clinvar',
+                'disease_association_score_hpo_clinvar', 'early_ratio', 'lof_ratio'] + \
+                [col for col in df.columns if col.startswith('pheno_')] + \
+                [col for col in df.columns if col.startswith('var_') and col not in ['var_other']]
+# Удалим колонки с большим числом пропусков или константные
+corr_df = df[cols_to_corr].dropna(axis=1, how='all')
+corr = corr_df.corr()
+plt.figure(figsize=(20, 16))
+sns.heatmap(corr, annot=False, cmap='coolwarm', center=0, linewidths=0.5)
+plt.title('Correlation Matrix of Key Features')
+plt.tight_layout()
+plt.show()
+
+# 6. Органные системы – средние значения (топ-10)
+pheno_cols = [col for col in df.columns if col.startswith('pheno_')]
+pheno_means = df[pheno_cols].mean().sort_values(ascending=False)
+plt.figure(figsize=(10, 6))
+pheno_means.head(10).plot(kind='bar')
+plt.title('Top 10 Organ Systems by Average Number of HPO Terms')
+plt.ylabel('Mean count')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# 7. Распределение early_ratio по наличию симптомов в неврологической системе
+df['has_neuro'] = df['pheno_neurological'] > 0
+plt.figure(figsize=(8, 5))
+sns.boxplot(data=df, x='has_neuro', y='early_ratio')
+plt.xticks([0,1], ['No neuro symptoms', 'Has neuro symptoms'])
+plt.title('Early Ratio by Presence of Neurological Symptoms')
+plt.show()
+
+# 8. Топ-10 типов мутаций (исключая var_other)
+var_cols = [col for col in df.columns if col.startswith('var_') and col != 'var_other']
+var_means = df[var_cols].mean().sort_values(ascending=False)
+plt.figure(figsize=(10, 6))
+var_means.head(10).plot(kind='bar')
+plt.title('Top 10 Mutation Types by Average Count')
+plt.ylabel('Mean count')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# 9. Тепловая карта нормализованных фенотипических профилей (кластеризация)
+from sklearn.preprocessing import StandardScaler
+pheno_data = df[pheno_cols].fillna(0)
+scaler = StandardScaler()
+pheno_scaled = scaler.fit_transform(pheno_data)
+plt.figure(figsize=(12, 10))
+sns.clustermap(pheno_scaled, cmap='viridis', row_cluster=True, col_cluster=True,
+               yticklabels=False, cbar_kws={'label': 'Standardized count'})
+plt.title('Clustered Heatmap of Organ System Profiles (rows=genes, cols=systems)')
+plt.show()
+
+# 10. Сохраним визуализации (опционально)
+# files.download('correlation_heatmap.png')  # если нужно сохранить
