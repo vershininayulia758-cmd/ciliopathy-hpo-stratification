@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Улучшенный конвейер для анализа генов цилиопатий.
+Источник фенотипов: GeneReviews (парсинг текста, частота >= 50%).
+Источник вариантов: ClinVar (все варианты с весами по звёздам).
+Метрики: объективные, без произвольных порогов насыщения.
+"""
+
+import os
+import re
+import json
+import gzip
+import zipfile
+import shutil
+from pathlib import Path
+from collections import defaultdict
+from typing import Dict, List, Tuple, Optional, Set
+
+import requests
+import pandas as pd
+import numpy as np
+from tqdm import tqdm
+from datasets import load_dataset
+import openpyxl
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import spearmanr
+
+# ===================== КОНФИГУРАЦИЯ =====================
+GENES_LIST = [
+    "ABCA12", "ABCA4", "ACOT13", "ACVR2A", "ACVR2B", "ADAMTS16", "ADAMTS5", "ADAMTS6", "ADAMTS9",
+    "ADGRV1", "AGBL5", "AHI1", "AHR", "AIPL1", "ALG5", "ALG9", "ALMS1", "ANKFN1", "ANKS6",
+    "ARF1", "ARHGEF11", "ARHGEF18", "ARL13B", "ARL2BP", "ARL3", "ARL6", "ARMC9", "ARSG",
+    "ATXN2", "B9D1", "B9D2", "BBIP1", "BBS1", "BBS10", "BBS12", "BBS2", "BBS4", "BBS5",
+    "BBS7", "BBS9", "BEST1", "BMP4", "C2CD3", "C8ORF37", "CACNA1F", "CACNA1G", "CACNB4",
+    "CBY1", "CC2D2A", "CCDC103", "CCDC40", "CCDC65", "CCT7", "CDH23", "CDHR1", "CEP104",
+    "CEP120", "CEP192", "CEP250", "CEP290", "CEP41", "CEP55", "CEP78", "CEP83", "CERKL",
+    "CFAP298", "CFAP300", "CFAP52", "CFAP53", "CFAP57", "CIB2", "CLCC1", "CLRN1", "CNGA1",
+    "COCH", "COL2A1", "CPLANE1", "CRB1", "CRHR1", "CSPP1", "CTNNB1", "DAG1", "DCDC2",
+    "DDX59", "DHCR7", "DHDDS", "DHX38", "DNAAF1", "DNAAF2", "DNAJB11", "DRAM2", "DYNC2H1",
+    "DYNC2LI1", "DZIP1L", "ELOVL4", "EYS", "FAM149B1", "FAM161A", "FCYT", "FHAD1", "FLCN",
+    "FLRT1", "FN1", "FOXJ1", "FSCN2", "GANAB", "GATA1", "GATA2", "GATA3", "GATA4", "GATA5",
+    "GATA6", "GDF6", "GLI3", "GLIS2", "GNAS", "GNB1", "GUCA1A", "GUCA1B", "GUCY1A1",
+    "GUCY1B1", "GUCY2D", "HES7", "HGSNAT", "HHIP", "HK1", "HNF1B", "HYLS1", "IDH3A",
+    "IDH3B", "IFT122", "IFT140", "IFT172", "IFT27", "IFT38", "IFT46", "IFT52", "IFT57",
+    "IFT74", "IFT80", "IFT81", "IFT88", "IMPDH1", "INPP5E", "INTU", "INVS", "IQCB1",
+    "ITGA5", "KCNJ13", "KIAA0586", "KIAA1549", "KIF14", "KIF3B", "KIF7", "KLF2", "KLF5",
+    "KLHL7", "LAMA1", "LBX1", "LCA5", "LRAT", "LRRC6", "LRRCC1", "LZTFL1", "MAK",
+    "MAPKBP1", "MEGF8", "MERTK", "MIR145", "MKKS", "MKS1", "MYH6", "MYO7A", "NBL1",
+    "NEK1", "NEK2", "NEK8", "NME7", "NOP56", "NPHP1", "NPHP3", "NPHP4", "NPHP7",
+    "NR2E3", "NRL", "OCRL", "OFD1", "PACRG", "PARD6A", "PARD6B", "PARD6G", "PAX6",
+    "PCDH15", "PDE1A", "PDE6A", "PDE6B", "PDE6C", "PDE6D", "PDE6G", "PDZD7", "PI4KB",
+    "PIBF1", "PINK1", "PIP5K1A", "PIP5K1B", "PIP5K1C", "PITPNM3", "PKD1", "PKD1L1",
+    "PKD2", "PKD2L1", "PMM2", "PNPLA6", "POC1B", "POMGNT1", "PRKACB", "PROK2", "PROM1",
+    "PRPF31", "PRPF4", "PRPF6", "PRPH2", "PTCH1", "PTGER2", "PTK7", "RAB21", "RAB23",
+    "RAB28", "RAD21", "RBP3", "RD3", "RDH12", "REEP6", "RET", "RGR", "RHO", "RIBC1",
+    "RIMS1", "RP2", "RPE65", "RPGR", "RPGRIP1", "RPGRIP1L", "RSPH3", "RSPH4A", "RTN4IP1",
+    "RUVBL1", "SAG", "SAXO2", "SCLT1", "SDCCAG8", "SLC7A14", "SMO", "SNAP29", "SNRNP200",
+    "STAT3", "SUFU", "TAPT1", "TCTN1", "TCTN2", "TMEM107", "TMEM138", "TMEM216", "TMEM218",
+    "TMEM231", "TMEM237", "TMEM67", "TMEM88", "TMOD4", "TNNT2", "TOGARAM1", "TOPORS",
+    "TRAF3IP1", "TRAPPC11", "TRIM32", "TRPV4", "TSC1", "TTC12", "TTC21B", "TTC8", "TTLL5",
+    "TULP3", "TXNDC15", "USH1C", "USH1G", "USH2A", "USP45", "WDPCP", "WDR19", "WDR35",
+    "XPNPEP3", "ZIC2", "ZIC3", "ZMYND12", "ZNF408", "ZNF423", "ZNF513", "ZRSR2"
+]
+
+# Синонимы генов для ClinVar
+GENE_SYNONYMS = {
+    "ARL6": ["BBS3"],
+    "INVS": ["NPHP2"],
+    "MKKS": ["BBS6"],
+    "WDR19": ["IFT144"],
+}
+
+DATA_DIR = Path("./ciliopathy_data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# URL для ClinVar (HPO больше не нужен для извлечения симптомов, но оставим для классификации систем, если надо)
+# Для простоты мы не будем классифицировать системы в этой версии, только возраст.
+CLINVAR_URL = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz"
+
+# ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+def expand_genes_with_synonyms(gene_list: List[str]) -> Set[str]:
+    expanded = set(gene_list)
+    for gene in gene_list:
+        expanded.update(GENE_SYNONYMS.get(gene, []))
+    return expanded
+
+
+# ===================== ПАРСИНГ GENE REVIEWS =====================
+class GeneReviewsParser:
+    """
+    Парсит датасет GeneReviews, извлекает симптомы с частотой >= 50%.
+    Возвращает для каждого гена список симптомов с текстом, частотой (в %), возрастной группой.
+    """
+    # Соответствие текстовых маркеров высокой частоты условным процентам (по экспертной оценке)
+    HIGH_MARKER_PERCENT = {
+        'virtually all': 95,
+        'core feature': 90,
+        'most': 80,
+        'majority': 75,
+        'frequently': 70,
+        'typically': 65,
+        'commonly': 60,
+        'often': 55
+    }
+
+    def __init__(self, freq_threshold: float = 50.0):
+        """
+        freq_threshold: минимальный процент частоты (по умолчанию 50%).
+        """
+        self.freq_threshold = freq_threshold
+
+    def load_genereviews(self) -> Dict[str, List[Dict]]:
+        """
+        Загружает датасет GeneReviews и возвращает словарь:
+        ключ - ген, значение - список симптомов (каждый симптом - dict).
+        """
+        print("Загрузка GeneReviews...")
+        dataset = load_dataset("Tonic/GeneReviews", split="train")
+        gene_symptoms = defaultdict(list)
+
+        for record in tqdm(dataset, desc="Обработка GeneReviews"):
+            title = record.get("title", "")
+            keywords = record.get("keywords", "")
+            content = record.get("content", "")
+
+            # Ищем гены в заголовке или ключевых словах
+            genes_in_record = []
+            for gene in GENES_LIST:
+                if gene in title or gene in keywords:
+                    genes_in_record.append(gene)
+
+            # Если не нашли, ищем в тексте (первые 5000 символов для скорости)
+            if not genes_in_record:
+                text_preview = content[:5000]
+                for gene in GENES_LIST:
+                    if gene in text_preview:
+                        genes_in_record.append(gene)
+
+            if not genes_in_record:
+                continue
+
+            clinical_text = self._extract_clinical_section(content)
+            if not clinical_text:
+                continue
+
+            sentences = re.split(r'(?<=[.!?])\s+', clinical_text)
+            for sent in sentences:
+                freq_percent = self._extract_frequency(sent)
+                if freq_percent is None or freq_percent < self.freq_threshold:
+                    continue
+
+                age_group = self._extract_age_of_onset(sent)
+
+                symptom = {
+                    "text": sent.strip(),
+                    "frequency_percent": freq_percent,
+                    "age_group": age_group
+                }
+
+                for gene in genes_in_record:
+                    gene_symptoms[gene].append(symptom)
+
+        print(f"Найдено симптомов >= {self.freq_threshold}% для {len(gene_symptoms)} генов.")
+        return gene_symptoms
+
+    def _extract_clinical_section(self, content: str) -> str:
+        """Извлекает раздел Clinical Characteristics с помощью регулярных выражений."""
+        patterns = [
+            r'(?:Clinical Characteristics|Clinical Manifestations|Clinical Features|Clinical Description)\s*([\s\S]*?)(?=Diagnosis|Management|Genetic Counseling|Molecular Genetics|References|Summary|$)'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _extract_frequency(self, sentence: str) -> Optional[float]:
+        """
+        Извлекает частоту из предложения.
+        Возвращает процент (float) или None, если частота не найдена или < порога.
+        """
+        s = sentence.lower()
+
+        # Ищем числовой процент
+        percent_match = re.search(r'(\d+)[–-]?(\d+)?%', s)
+        if percent_match:
+            if '-' in percent_match.group(0) or '–' in percent_match.group(0):
+                low = int(percent_match.group(1))
+                high = int(percent_match.group(2)) if percent_match.group(2) else low
+                avg = (low + high) / 2
+            else:
+                avg = int(percent_match.group(1))
+            return avg
+
+        # Текстовые маркеры высокой частоты
+        for marker, percent in self.HIGH_MARKER_PERCENT.items():
+            if marker in s:
+                return percent
+
+        # Остальное (rare, occasional, very rare, not specified) игнорируем
+        return None
+
+    def _extract_age_of_onset(self, sentence: str) -> str:
+        """Определяет возрастную группу: early, late, unknown."""
+        s = sentence.lower()
+        early_markers = ["prenatal", "fetal", "congenital", "neonatal", "infant", "birth", "newborn"]
+        late_markers = ["childhood", "juvenile", "adult", "adolescent", "late-onset", "degenerative", "progressive"]
+        if any(m in s for m in early_markers):
+            return "early"
+        elif any(m in s for m in late_markers):
+            return "late"
+        return "unknown"
+
+
+# ===================== ПАРСИНГ CLINVAR =====================
+class ClinVarParser:
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+
+    @staticmethod
+    def _get_stars(val) -> int:
+        if pd.isna(val):
+            return 0
+        val_str = str(val)
+        if '0 stars' in val_str:
+            return 0
+        elif '1 star' in val_str:
+            return 1
+        elif '2 stars' in val_str:
+            return 2
+        elif '3 stars' in val_str:
+            return 3
+        elif '4 stars' in val_str:
+            return 4
+        else:
+            return 0
+
+    @staticmethod
+    def _parse_clin_sig(val) -> str:
+        if pd.isna(val):
+            return "Other"
+        val_str = str(val).lower()
+        if 'pathogenic' in val_str and 'likely' not in val_str:
+            return "Pathogenic"
+        elif 'likely pathogenic' in val_str:
+            return "Likely pathogenic"
+        elif 'uncertain significance' in val_str:
+            return "Uncertain significance"
+        elif 'likely benign' in val_str:
+            return "Likely benign"
+        elif 'benign' in val_str:
+            return "Benign"
+        elif 'conflicting' in val_str:
+            return "Conflicting"
+        else:
+            return "Other"
+
+    @staticmethod
+    def _parse_age_of_onset(age_str) -> str:
+        if not age_str or pd.isna(age_str):
+            return "unknown"
+        s = str(age_str).lower()
+        if any(x in s for x in ["prenatal", "fetal", "congenital", "neonatal", "infant"]):
+            return "early"
+        elif any(x in s for x in ["child", "juvenile", "adult", "adolescent", "late-onset"]):
+            return "late"
+        return "unknown"
+
+    def load_clinvar(self, genes: List[str]) -> Dict[str, List[Dict]]:
+        expanded_genes = expand_genes_with_synonyms(genes)
+        clinvar_path = self.data_dir / "variant_summary.txt"
+        gz_path = self.data_dir / "variant_summary.txt.gz"
+
+        if not clinvar_path.exists():
+            if not gz_path.exists():
+                print("Скачивание ClinVar...")
+                r = requests.get(CLINVAR_URL, stream=True)
+                with open(gz_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            print("Распаковка ClinVar...")
+            with gzip.open(gz_path, 'rb') as f_in:
+                with open(clinvar_path, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+
+        gene_variants = defaultdict(list)
+        chunk_size = 100000
+
+        for chunk in tqdm(pd.read_csv(clinvar_path, sep='\t', dtype=str, chunksize=chunk_size, low_memory=False),
+                          desc="Обработка ClinVar"):
+            cols = {col.lower(): col for col in chunk.columns}
+            gene_col = cols.get("genesymbol")
+            review_col = cols.get("reviewstatus")
+            clin_sig_col = cols.get("clinicalsignificance")
+            age_col = cols.get("ageofonset")
+            if not all([gene_col, review_col, clin_sig_col]):
+                continue
+
+            chunk['gene_upper'] = chunk[gene_col].str.upper()
+            chunk = chunk[chunk['gene_upper'].isin(expanded_genes)]
+
+            chunk['stars'] = chunk[review_col].apply(self._get_stars)
+            chunk['clin_sig'] = chunk[clin_sig_col].apply(self._parse_clin_sig)
+            if age_col:
+                chunk['age_group'] = chunk[age_col].apply(self._parse_age_of_onset)
+            else:
+                chunk['age_group'] = "unknown"
+
+            for _, row in chunk.iterrows():
+                gene = row['gene_upper']
+                variant = {
+                    'clin_sig': row['clin_sig'],
+                    'stars': row['stars'],
+                    'age_group': row['age_group'],
+                }
+                gene_variants[gene].append(variant)
+
+        print(f"Найдено вариантов для {len(gene_variants)} генов.")
+        return gene_variants
+
+
+# ===================== РАСЧЁТ МЕТРИК =====================
+def calculate_metrics(gene_symptoms: Dict[str, List[Dict]],
+                      gene_variants: Dict[str, List[Dict]]) -> pd.DataFrame:
+    """
+    Рассчитывает улучшенные метрики:
+    - phenotype_score: сумма частот симптомов (нормированная на 95-й перцентиль)
+    - pathogenicity_score: взвешенный по звёздам и значимости
+    - disease_association_score: Z-сумма
+    - data_quality: полнота
+    Также стратификация по возрасту для вариантов.
+    """
+    rows = []
+    # Соберём все суммы частот для нормализации
+    sum_freqs = []
+
+    for gene in GENES_LIST:
+        symptoms = gene_symptoms.get(gene, [])
+        n_symptoms = len(symptoms)
+        if n_symptoms > 0:
+            sum_freq = sum(s['frequency_percent'] for s in symptoms)
+            sum_freqs.append(sum_freq)
+        else:
+            sum_freq = 0.0
+            sum_freqs.append(0.0)
+
+        variants = gene_variants.get(gene, [])
+        n_variants = len(variants)
+
+        # Патогенетический балл (взвешенный)
+        sig_map = {
+            'Pathogenic': 1.0,
+            'Likely pathogenic': 0.7,
+            'Uncertain significance': 0.0,
+            'Likely benign': -0.3,
+            'Benign': -0.7,
+            'Conflicting': 0.0,
+            'Other': 0.0
+        }
+        star_weights = {0: 0.5, 1: 1.0, 2: 1.3, 3: 1.7, 4: 2.0}
+        weighted_sig_sum = 0.0
+        weight_sum = 0.0
+        pathogenic_count = 0
+        # Стратификация по возрасту
+        early_variants = [v for v in variants if v.get('age_group') == 'early']
+        late_variants = [v for v in variants if v.get('age_group') == 'late']
+
+        for v in variants:
+            sig = v.get('clin_sig', 'Other')
+            stars = v.get('stars', 0)
+            weight = star_weights.get(stars, 0.5)
+            sig_score = sig_map.get(sig, 0.0)
+            weighted_sig_sum += sig_score * weight
+            weight_sum += weight
+            if sig_score >= 0.7:
+                pathogenic_count += 1
+
+        if weight_sum > 0:
+            avg_weighted = weighted_sig_sum / weight_sum
+            pathogenicity_score = ((avg_weighted + 0.7) / 1.7) * 10
+            pathogenicity_score = min(max(pathogenicity_score, 0), 10)
+        else:
+            pathogenicity_score = 0.0
+
+        # Стратифицированные баллы (для информации)
+        def calc_patho(variant_list):
+            if not variant_list:
+                return 0.0
+            w_sum = 0.0
+            w_sig = 0.0
+            for v in variant_list:
+                sig = v.get('clin_sig', 'Other')
+                stars = v.get('stars', 0)
+                weight = star_weights.get(stars, 0.5)
+                sig_score = sig_map.get(sig, 0.0)
+                w_sig += sig_score * weight
+                w_sum += weight
+            if w_sum > 0:
+                avg = w_sig / w_sum
+                return ((avg + 0.7) / 1.7) * 10
+            return 0.0
+
+        patho_early = calc_patho(early_variants)
+        patho_late = calc_patho(late_variants)
+
+        rows.append({
+            'gene': gene,
+            'n_symptoms': n_symptoms,
+            'sum_freq': sum_freq,
+            'n_variants': n_variants,
+            'pathogenic_count': pathogenic_count,
+            'pathogenicity_score_raw': pathogenicity_score,
+            'patho_early': patho_early,
+            'patho_late': patho_late,
+            'n_early': len(early_variants),
+            'n_late': len(late_variants),
+        })
+
+    df_raw = pd.DataFrame(rows)
+
+    # Нормализация phenotype_score (95-й перцентиль суммы частот)
+    max_sum = df_raw['sum_freq'].quantile(0.95) if not df_raw['sum_freq'].empty else 1.0
+    if max_sum == 0:
+        max_sum = 1.0
+    df_raw['phenotype_score'] = (df_raw['sum_freq'] / max_sum) * 10
+    df_raw['phenotype_score'] = df_raw['phenotype_score'].clip(0, 10)
+
+    # Качество данных
+    df_raw['has_hpo'] = (df_raw['n_symptoms'] > 0).astype(int)  # здесь HPO не используется, но оставим как proxy
+    df_raw['has_variants'] = (df_raw['n_variants'] > 0).astype(int)
+    df_raw['has_pathogenic'] = (df_raw['pathogenic_count'] > 0).astype(int)
+    df_raw['has_rich'] = ((df_raw['n_symptoms'] > 5) & (df_raw['n_variants'] > 5)).astype(int)
+    df_raw['data_quality'] = (df_raw[['has_hpo','has_variants','has_pathogenic','has_rich']].sum(axis=1) / 4) * 100
+
+    # Z-сумма для интегрального балла
+    z_pheno = (df_raw['phenotype_score'] - df_raw['phenotype_score'].mean()) / df_raw['phenotype_score'].std(ddof=0)
+    z_patho = (df_raw['pathogenicity_score_raw'] - df_raw['pathogenicity_score_raw'].mean()) / df_raw['pathogenicity_score_raw'].std(ddof=0)
+    df_raw['disease_association_score'] = z_pheno + z_patho
+    # Нормализуем в 0–10
+    min_score = df_raw['disease_association_score'].min()
+    max_score = df_raw['disease_association_score'].max()
+    if max_score > min_score:
+        df_raw['disease_association_score_norm'] = ((df_raw['disease_association_score'] - min_score) / (max_score - min_score)) * 10
+    else:
+        df_raw['disease_association_score_norm'] = 0.0
+
+    final_df = pd.DataFrame({
+        'Gene': df_raw['gene'],
+        'N_symptoms_ge50': df_raw['n_symptoms'],
+        'Phenotype_score': df_raw['phenotype_score'].round(2),
+        'N_variants': df_raw['n_variants'],
+        'Pathogenic_count': df_raw['pathogenic_count'],
+        'Pathogenicity_score': df_raw['pathogenicity_score_raw'].round(2),
+        'Patho_early': df_raw['patho_early'].round(2),
+        'Patho_late': df_raw['patho_late'].round(2),
+        'N_early_variants': df_raw['n_early'],
+        'N_late_variants': df_raw['n_late'],
+        'Disease_association_score': df_raw['disease_association_score_norm'].round(2),
+        'Data_quality_%': df_raw['data_quality'].round(2),
+    })
+    return final_df
+
+
+# ===================== АНАЛИЗ ЧУВСТВИТЕЛЬНОСТИ =====================
+def sensitivity_analysis(gene_symptoms_dict: Dict[str, List[Dict]], thresholds=[30, 50, 70]):
+    """Сравнивает ранжирование генов при разных порогах частот."""
+    scores = {}
+    for th in thresholds:
+        # Пересчитываем phenotype_score для каждого гена с порогом th
+        gene_scores = {}
+        for gene in GENES_LIST:
+            syms = gene_symptoms_dict.get(gene, [])
+            # Фильтруем по порогу
+            filtered = [s['frequency_percent'] for s in syms if s['frequency_percent'] >= th]
+            if filtered:
+                sum_freq = sum(filtered)
+                gene_scores[gene] = sum_freq
+            else:
+                gene_scores[gene] = 0.0
+        # Нормализуем на 95-й перцентиль
+        sums = list(gene_scores.values())
+        max_sum = np.percentile(sums, 95) if sums else 1.0
+        if max_sum == 0:
+            max_sum = 1.0
+        scores[th] = {g: (s / max_sum)*10 for g, s in gene_scores.items()}
+
+    # Корреляции между порогами
+    results = {}
+    for i, th1 in enumerate(thresholds):
+        for th2 in thresholds[i+1:]:
+            common_genes = set(scores[th1].keys()) & set(scores[th2].keys())
+            if common_genes:
+                v1 = [scores[th1][g] for g in common_genes]
+                v2 = [scores[th2][g] for g in common_genes]
+                rho, p = spearmanr(v1, v2)
+                results[f"{th1}%_vs_{th2}%"] = {'rho': rho, 'p_value': p}
+    return results
+
+
+# ===================== ЭКСПОРТ =====================
+def export_results(df: pd.DataFrame,
+                   gene_symptoms: Dict[str, List[Dict]],
+                   gene_variants: Dict[str, List[Dict]],
+                   output_dir: Path):
+    output_dir.mkdir(exist_ok=True)
+
+    # Excel
+    excel_path = output_dir / "ciliopathy_analysis.xlsx"
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Summary', index=False)
+
+        # Детальные симптомы
+        rows_sym = []
+        for gene, syms in gene_symptoms.items():
+            for s in syms:
+                rows_sym.append({
+                    'Gene': gene,
+                    'Symptom_text': s['text'],
+                    'Frequency_%': s['frequency_percent'],
+                    'Age_group': s.get('age_group', 'unknown')
+                })
+        df_sym = pd.DataFrame(rows_sym)
+        df_sym.to_excel(writer, sheet_name='Core_Symptoms', index=False)
+
+        # Детальные варианты
+        rows_var = []
+        for gene, vars_list in gene_variants.items():
+            for v in vars_list:
+                rows_var.append({
+                    'Gene': gene,
+                    'Clinical_significance': v.get('clin_sig', ''),
+                    'Review_stars': v.get('stars', 0),
+                    'Age_group': v.get('age_group', 'unknown')
+                })
+        df_var = pd.DataFrame(rows_var)
+        df_var.to_excel(writer, sheet_name='ClinVar_variants', index=False)
+
+    # CSV
+    df.to_csv(output_dir / "summary.csv", index=False, encoding='utf-8-sig')
+
+    # JSON
+    full_data = {
+        'summary': df.to_dict(orient='records'),
+        'symptoms': {gene: syms for gene, syms in gene_symptoms.items()},
+        'variants': {gene: vars_list for gene, vars_list in gene_variants.items()}
+    }
+    with open(output_dir / "full_data.json", 'w', encoding='utf-8') as f:
+        json.dump(full_data, f, ensure_ascii=False, indent=2)
+
+    # HTML-отчёт
+    html = f"""
+    <html><head><meta charset="UTF-8"><title>Отчёт</title>
+    <style>body{{font-family:Arial;margin:20px;}}
+    table{{border-collapse:collapse;width:100%;}}
+    th,td{{border:1px solid #ddd;padding:8px;text-align:left;}}
+    th{{background:#4CAF50;color:white;}}
+    </style></head><body>
+    <h1>Результаты анализа цилиопатий (GeneReviews + ClinVar)</h1>
+    <p>Всего генов: {len(df)}</p>
+    <p>Генов с симптомами (≥50%): {df[df['N_symptoms_ge50']>0].shape[0]}</p>
+    <p>Генов с вариантами: {df[df['N_variants']>0].shape[0]}</p>
+    {df.to_html(index=False, float_format="%.2f")}
+    </body></html>
+    """
+    with open(output_dir / "report.html", 'w', encoding='utf-8') as f:
+        f.write(html)
+
+    # Графики
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    metrics = ['Phenotype_score', 'Pathogenicity_score', 'Disease_association_score', 'Data_quality_%', 'Patho_early', 'Patho_late']
+    for i, met in enumerate(metrics):
+        if i >= len(metrics):
+            break
+        ax = axes[i//3, i%3]
+        df[met].hist(bins=20, ax=ax, color='skyblue', edgecolor='black')
+        ax.set_title(met)
+    plt.tight_layout()
+    plt.savefig(output_dir / 'metrics_plots.png', dpi=300)
+    plt.close()
+
+    # Топ-15
+    top = df.nlargest(15, 'Disease_association_score')
+    plt.figure(figsize=(10, 8))
+    sns.barplot(x='Disease_association_score', y='Gene', data=top, palette='viridis')
+    plt.title('Top 15 by disease association score')
+    plt.tight_layout()
+    plt.savefig(output_dir / 'top15.png', dpi=300)
+    plt.close()
+
+    # ZIP
+    zip_path = output_dir.parent / "ciliopathy_analysis_results.zip"
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for file in output_dir.iterdir():
+            zipf.write(file, arcname=file.name)
+    print(f"Результаты упакованы в {zip_path}")
+    return zip_path
+
+
+# ===================== ДЛЯ COLAB =====================
+def download_from_colab(file_path: Path):
+    try:
+        from google.colab import files
+        files.download(str(file_path))
+        print(f"Файл {file_path.name} отправлен на скачивание.")
+    except ImportError:
+        print("Скрипт запущен не в Colab. Файл сохранён локально.")
+
+
+# ===================== ОСНОВНОЙ КОНВЕЙЕР =====================
+def main():
+    print("=== Улучшенный анализ цилиопатий (GeneReviews + ClinVar) ===")
+
+    # 1. Парсим GeneReviews
+    freq_threshold = 50.0  # по требованию PI
+    gr_parser = GeneReviewsParser(freq_threshold=freq_threshold)
+    gene_symptoms = gr_parser.load_genereviews()
+
+    # 2. Парсим ClinVar
+    print("\nЗагрузка ClinVar...")
+    clin_parser = ClinVarParser(DATA_DIR)
+    gene_variants = clin_parser.load_clinvar(GENES_LIST)
+
+    # 3. Расчёт метрик
+    df = calculate_metrics(gene_symptoms, gene_variants)
+
+    # 4. Анализ чувствительности по порогу частоты
+    print("\nАнализ чувствительности по порогам частот (30%, 50%, 70%)...")
+    sens_results = sensitivity_analysis(gene_symptoms, thresholds=[30, 50, 70])
+    print("Корреляции между ранжированиями при разных порогах:")
+    for key, val in sens_results.items():
+        print(f"  {key}: rho = {val['rho']:.3f}, p = {val['p_value']:.4f}")
+
+    # 5. Экспорт
+    output_dir = DATA_DIR / "results"
+    zip_path = export_results(df, gene_symptoms, gene_variants, output_dir)
+
+    # 6. Скачивание (Colab)
+    download_from_colab(zip_path)
+
+    print("\n✅ Готово! Все результаты сохранены.")
+
+
+if __name__ == "__main__":
+    main()
